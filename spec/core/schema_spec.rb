@@ -397,6 +397,24 @@ describe "DB#create_table" do
     @db.sqls.should == ["CREATE TABLE cats (name text, UNIQUE (name))"]
   end
 
+  specify "should accept partial index definitions" do
+    def @db.supports_partial_indexes?() true end
+    @db.create_table(:cats) do
+      integer :id
+      index :id, :where=>proc{id > 1}
+    end
+    @db.sqls.should == ["CREATE TABLE cats (id integer)", "CREATE INDEX cats_id_index ON cats (id) WHERE (id > 1)"]
+  end
+
+  specify "should raise an error if partial indexes are not supported" do
+    proc do 
+      @db.create_table(:cats) do
+        integer :id
+        index :id, :where=>proc{id > 1}
+      end
+    end.should raise_error(Sequel::Error)
+  end
+
   specify "should not raise on index error for unsupported index definitions if ignore_index_errors is used" do
     proc {
       @db.create_table(:cats, :ignore_index_errors=>true) do
@@ -446,7 +464,7 @@ describe "DB#create_table" do
     meta_def(@db, :execute_ddl){|*a| raise Sequel::DatabaseError if /blah/.match(a.first); super(*a)}
     lambda{@db.create_table(:cats){Integer :id; index :blah; index :id}}.should raise_error(Sequel::DatabaseError)
     @db.sqls.should == ['CREATE TABLE cats (id integer)']
-    lambda{@db.create_table(:cats, :ignore_index_errors=>true){Integer :id; index :blah; index :id}}.should_not raise_error(Sequel::DatabaseError)
+    lambda{@db.create_table(:cats, :ignore_index_errors=>true){Integer :id; index :blah; index :id}}.should_not raise_error
     @db.sqls.should == ['CREATE TABLE cats (id integer)', 'CREATE INDEX cats_id_index ON cats (id)']
   end
 
@@ -549,6 +567,14 @@ describe "DB#create_table" do
       constraint :valid_score, 'score <= 100'
     end
     @db.sqls.should == ["CREATE TABLE cats (score integer, CONSTRAINT valid_score CHECK (score <= 100))"]
+  end
+
+  specify "should accept named constraint definitions with options" do
+    @db.create_table(:cats) do
+      integer :score
+      constraint({:name=>:valid_score, :deferrable=>true}, 'score <= 100')
+    end
+    @db.sqls.should == ["CREATE TABLE cats (score integer, CONSTRAINT valid_score CHECK (score <= 100) DEFERRABLE INITIALLY DEFERRED)"]
   end
 
   specify "should accept named constraint definitions with block" do
@@ -892,6 +918,13 @@ describe "DB#alter_table" do
     @db.sqls.should == ["ALTER TABLE cats ADD CONSTRAINT valid_score CHECK (score <= 100)"]
   end
 
+  specify "should support add_constraint with options" do
+    @db.alter_table(:cats) do
+      add_constraint({:name=>:valid_score, :deferrable=>true}, 'score <= 100')
+    end
+    @db.sqls.should == ["ALTER TABLE cats ADD CONSTRAINT valid_score CHECK (score <= 100) DEFERRABLE INITIALLY DEFERRED"]
+  end
+
   specify "should support add_constraint with block" do
     @db.alter_table(:cats) do
       add_constraint(:blah_blah){(x.sql_number > 0) & (y.sql_number < 1)}
@@ -950,7 +983,7 @@ describe "DB#alter_table" do
   specify "should ignore errors if the database raises an error on an add_index call and the :ignore_errors option is used" do
     meta_def(@db, :execute_ddl){|*a| raise Sequel::DatabaseError}
     lambda{@db.add_index(:cats, :id)}.should raise_error(Sequel::DatabaseError)
-    lambda{@db.add_index(:cats, :id, :ignore_errors=>true)}.should_not raise_error(Sequel::DatabaseError)
+    lambda{@db.add_index(:cats, :id, :ignore_errors=>true)}.should_not raise_error
     @db.sqls.should == []
   end
 
@@ -1499,6 +1532,7 @@ describe "Schema Parser" do
     @db = Sequel.mock(:host=>'postgres')
     @db.extend(sm)
     @db.schema(:interval).first.last[:type].should == :interval
+    @db.schema(:citext).first.last[:type].should == :string
 
     @db = Sequel.mock(:host=>'mysql')
     @db.extend(sm)

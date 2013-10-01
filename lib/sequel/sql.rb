@@ -1624,7 +1624,7 @@ module Sequel
               fun_args = ::Kernel.Array(opts[:*] ? WILDCARD : opts[:args])
               WindowFunction.new(Function.new(m, *fun_args), Window.new(opts))
             else
-              raise Error, 'unsupported VirtualRow method argument used with block'
+              Kernel.raise(Error, 'unsupported VirtualRow method argument used with block')
             end
           end
         elsif args.empty?
@@ -1692,7 +1692,7 @@ module Sequel
 
   # +LiteralString+ is used to represent literal SQL expressions. A 
   # +LiteralString+ is copied verbatim into an SQL statement. Instances of
-  # +LiteralString+ can be created by calling <tt>String#lit</tt>.
+  # +LiteralString+ can be created by calling <tt>Sequel.lit</tt>.
   class LiteralString
     include SQL::OrderMethods
     include SQL::ComplexExpressionMethods

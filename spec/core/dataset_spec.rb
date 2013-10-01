@@ -421,7 +421,12 @@ describe "Dataset#where" do
   specify "should handle partial names" do
     @dataset.where('price < :price AND id = :p', :p=>2, :price=>100).select_sql.should == "SELECT * FROM test WHERE (price < 100 AND id = 2)"
   end
-  
+
+  specify "should handle ::cast syntax when no parameters are supplied" do
+    @dataset.where('price::float = 10', {}).select_sql.should == "SELECT * FROM test WHERE (price::float = 10)"
+    @dataset.where('price::float ? 10', {}).select_sql.should == "SELECT * FROM test WHERE (price::float ? 10)"
+  end
+
   specify "should affect select, delete and update statements" do
     @d1.select_sql.should == "SELECT * FROM test WHERE (region = 'Asia')"
     @d1.delete_sql.should == "DELETE FROM test WHERE (region = 'Asia')"
@@ -1139,6 +1144,10 @@ describe "Dataset#from" do
     @dataset.from(:a, :b){[i, abc(de)]}.select_sql.should == "SELECT * FROM a, b, i, abc(de)"
   end
 
+  specify "should handle LATERAL subqueries" do
+    @dataset.from(:a, @dataset.from(:b).lateral).select_sql.should == "SELECT * FROM a, LATERAL (SELECT * FROM b) AS t1"
+  end
+
   specify "should accept :schema__table___alias symbol format" do
     @dataset.from(:abc__def).select_sql.should == "SELECT * FROM abc.def"
     @dataset.from(:a_b__c).select_sql.should == "SELECT * FROM a_b.c"
@@ -1609,10 +1618,10 @@ describe "Dataset#limit" do
   specify "should raise an error if an invalid limit or offset is used" do
     proc{@dataset.limit(-1)}.should raise_error(Sequel::Error)
     proc{@dataset.limit(0)}.should raise_error(Sequel::Error)
-    proc{@dataset.limit(1)}.should_not raise_error(Sequel::Error)
+    proc{@dataset.limit(1)}.should_not raise_error
     proc{@dataset.limit(1, -1)}.should raise_error(Sequel::Error)
-    proc{@dataset.limit(1, 0)}.should_not raise_error(Sequel::Error)
-    proc{@dataset.limit(1, 1)}.should_not raise_error(Sequel::Error)
+    proc{@dataset.limit(1, 0)}.should_not raise_error
+    proc{@dataset.limit(1, 1)}.should_not raise_error
   end
 end
 
@@ -2038,6 +2047,12 @@ describe "Dataset#join_table" do
   
   specify "should support multiple joins" do
     @d.join_table(:inner, :b, :items_id=>:id).join_table(:left_outer, :c, :b_id => :b__id).sql.should == 'SELECT * FROM "items" INNER JOIN "b" ON ("b"."items_id" = "items"."id") LEFT OUTER JOIN "c" ON ("c"."b_id" = "b"."id")'
+  end
+
+  specify "should handle LATERAL subqueries" do
+    @d.join(@d.lateral, :a=>:b).select_sql.should == 'SELECT * FROM "items" INNER JOIN LATERAL (SELECT * FROM "items") AS "t1" ON ("t1"."a" = "items"."b")'
+    @d.left_join(@d.lateral, :a=>:b).select_sql.should == 'SELECT * FROM "items" LEFT JOIN LATERAL (SELECT * FROM "items") AS "t1" ON ("t1"."a" = "items"."b")'
+    @d.cross_join(@d.lateral).select_sql.should == 'SELECT * FROM "items" CROSS JOIN LATERAL (SELECT * FROM "items") AS "t1"'
   end
   
   specify "should support arbitrary join types" do
@@ -3527,6 +3542,14 @@ describe "Sequel::Dataset#qualify" do
     @ds.select{sum(:over, :args=>:a, :partition=>:b, :order=>:c){}}.qualify.sql.should == 'SELECT sum(t.a) OVER (PARTITION BY t.b ORDER BY t.c) FROM t'
   end
 
+  specify "should handle SQL::DelayedEvaluation" do
+    t = :a
+    ds = @ds.filter(Sequel.delay{t}).qualify
+    ds.sql.should == 'SELECT t.* FROM t WHERE t.a'
+    t = :b
+    ds.sql.should == 'SELECT t.* FROM t WHERE t.b'
+  end
+
   specify "should handle all other objects by returning them unchanged" do
     @ds.select("a").filter{a(3)}.filter('blah').order(Sequel.lit('true')).group(Sequel.lit('a > ?', 1)).having(false).qualify.sql.should == "SELECT 'a' FROM t WHERE (a(3) AND (blah)) GROUP BY a > 1 HAVING 'f' ORDER BY true"
   end
@@ -4508,3 +4531,56 @@ describe "Dataset#escape_like" do
   end
 end
 
+describe "Dataset#supports_replace?" do
+  it "should be false by default" do
+    Sequel::Dataset.new(nil).supports_replace?.should be_false
+  end
+end
+
+describe "Dataset#supports_lateral_subqueries?" do
+  it "should be false by default" do
+    Sequel::Dataset.new(nil).supports_lateral_subqueries?.should be_false
+  end
+end
+
+describe "Frozen Datasets" do
+  before do
+    @ds = Sequel.mock[:test].freeze
+  end
+
+  it "should be returned by Dataset#freeze" do
+    @ds.should be_frozen
+  end
+
+  it "should have Dataset#freeze return receiver" do
+    @ds = Sequel.mock[:test]
+    @ds.freeze.should equal(@ds)
+  end
+
+  it "should have Dataset#freeze be a no-op" do
+    @ds.freeze.should equal(@ds)
+  end
+
+  it "should have clones be frozen" do
+    @ds.clone.should be_frozen
+  end
+
+  it "should have dups not be frozen" do
+    @ds.dup.should_not be_frozen
+  end
+
+  it "should raise an error when calling mutation methods" do
+    proc{@ds.select!(:a)}.should raise_error
+    proc{@ds.identifier_input_method = :a}.should raise_error
+    proc{@ds.identifier_output_method = :a}.should raise_error
+    proc{@ds.quote_identifiers = false}.should raise_error
+    proc{@ds.row_proc = proc{}}.should raise_error
+    proc{@ds.extension! :query}.should raise_error
+    proc{@ds.naked!}.should raise_error
+    proc{@ds.from_self!}.should raise_error
+  end
+
+  it "should not raise an error when calling query methods" do
+    @ds.select(:a).sql.should == 'SELECT a FROM test'
+  end
+end

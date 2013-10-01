@@ -22,7 +22,7 @@ module Sequel
     #
     #   # Attempting to delete the object where the filter doesn't
     #   # match any rows raises an error.
-    #   i1.delete # raises Sequel::Error
+    #   i1.delete # raises Sequel::NoExistingObject
     #
     #   # The other object that represents the same row has no
     #   # instance filters, and can be updated normally.
@@ -59,6 +59,15 @@ module Sequel
           clear_instance_filters
         end
 
+        # Duplicate internal structures when duplicating model instance.
+        def dup
+          ifs = instance_filters.dup
+          super.instance_eval do
+            @instance_filters = ifs
+            self
+          end
+        end
+      
         # Freeze the instance filters when freezing the object
         def freeze
           instance_filters.freeze
@@ -107,6 +116,16 @@ module Sequel
         # Apply the instance filters to the dataset returned by super.
         def _update_dataset
           apply_instance_filters(super)
+        end
+
+        # Only use prepared statements for update and delete queries
+        # if there are no instance filters.
+        def use_prepared_statements_for?(type)
+          if (type == :update || type == :delete) && !instance_filters.empty?
+            false
+          else
+            super
+          end
         end
       end
     end

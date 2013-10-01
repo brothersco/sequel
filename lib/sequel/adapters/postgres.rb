@@ -276,6 +276,31 @@ module Sequel
         rescue PGError, IOError
         end
       end
+
+      if SEQUEL_POSTGRES_USES_PG && Object.const_defined?(:PG) && ::PG.const_defined?(:Constants) && ::PG::Constants.const_defined?(:PG_DIAG_SCHEMA_NAME)
+        # Return a hash of information about the related PGError (or Sequel::DatabaseError that
+        # wraps a PGError), with the following entries:
+        #
+        # :schema :: The schema name related to the error
+        # :table :: The table name related to the error
+        # :column :: the column name related to the error
+        # :constraint :: The constraint name related to the error
+        # :type :: The datatype name related to the error
+        #
+        # This requires a PostgreSQL 9.3+ server and 9.3+ client library,
+        # and ruby-pg 0.16.0+ to be supported.
+        def error_info(e)
+          e = e.wrapped_exception if e.is_a?(DatabaseError)
+          r = e.result
+          h = {}
+          h[:schema] = r.error_field(::PG::PG_DIAG_SCHEMA_NAME)
+          h[:table] = r.error_field(::PG::PG_DIAG_TABLE_NAME)
+          h[:column] = r.error_field(::PG::PG_DIAG_COLUMN_NAME)
+          h[:constraint] = r.error_field(::PG::PG_DIAG_CONSTRAINT_NAME)
+          h[:type] = r.error_field(::PG::PG_DIAG_DATATYPE_NAME)
+          h
+        end
+      end
       
       # Execute the given SQL with the given args on an available connection.
       def execute(sql, opts=OPTS, &block)
@@ -608,16 +633,19 @@ module Sequel
       #
       # * :rows_per_fetch - the number of rows per fetch (default 1000).  Higher
       #   numbers result in fewer queries but greater memory use.
+      # * :cursor_name - the name assigned to the cursor (default 'sequel_cursor').
+      #   Nested cursors require different names.
       #
       # Usage:
       #
       #   DB[:huge_table].use_cursor.each{|row| p row}
       #   DB[:huge_table].use_cursor(:rows_per_fetch=>10000).each{|row| p row}
+      #   DB[:huge_table].use_cursor(:cursor_name=>'my_cursor').each{|row| p row}      
       #
       # This is untested with the prepared statement/bound variable support,
       # and unlikely to work with either.
       def use_cursor(opts=OPTS)
-        clone(:cursor=>{:rows_per_fetch=>1000}.merge(opts))
+        clone(:cursor=>{:rows_per_fetch=>1000, :cursor_name => 'sequel_cursor'}.merge(opts))
       end
 
       if SEQUEL_POSTGRES_USES_PG
@@ -732,12 +760,13 @@ module Sequel
       # Use a cursor to fetch groups of records at a time, yielding them to the block.
       def cursor_fetch_rows(sql)
         server_opts = {:server=>@opts[:server] || :read_only}
+        cursor_name = quote_identifier(@opts[:cursor][:cursor_name])
         db.transaction(server_opts) do 
           begin
-            execute_ddl("DECLARE sequel_cursor NO SCROLL CURSOR WITHOUT HOLD FOR #{sql}", server_opts)
+            execute_ddl("DECLARE #{cursor_name} NO SCROLL CURSOR WITHOUT HOLD FOR #{sql}", server_opts)
             rows_per_fetch = @opts[:cursor][:rows_per_fetch].to_i
             rows_per_fetch = 1000 if rows_per_fetch <= 0
-            fetch_sql = "FETCH FORWARD #{rows_per_fetch} FROM sequel_cursor"
+            fetch_sql = "FETCH FORWARD #{rows_per_fetch} FROM #{cursor_name}"
             cols = nil
             # Load columns only in the first fetch, so subsequent fetches are faster
             execute(fetch_sql) do |res|
@@ -752,7 +781,7 @@ module Sequel
               end
             end
           ensure
-            execute_ddl("CLOSE sequel_cursor", server_opts)
+            execute_ddl("CLOSE #{cursor_name}", server_opts)
           end
         end
       end

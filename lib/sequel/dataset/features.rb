@@ -95,6 +95,11 @@ module Sequel
       true
     end
     
+    # Whether the dataset supports LATERAL for subqueries in the FROM or JOIN clauses.
+    def supports_lateral_subqueries?
+      false
+    end
+    
     # Whether modifying joined datasets is supported.
     def supports_modifying_joins?
       false
@@ -114,6 +119,11 @@ module Sequel
     
     # Whether the dataset supports pattern matching by regular expressions.
     def supports_regexp?
+      false
+    end
+
+    # Whether the dataset supports REPLACE syntax, false by default.
+    def supports_replace?
       false
     end
 

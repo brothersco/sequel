@@ -1,3 +1,99 @@
+=== HEAD
+
+* Fix literalization of empty blobs on MySQL (jeremyevans) (#715)
+
+* Ensure Dataset#page_count in pagination extension is at least one (jeremyevans) (#714)
+
+* Recognize another disconnect error in the jdbc/as400 adapter (jeremyevans)
+
+* Make Dataset#qualify and Sequel.delay work together (jeremyevans)
+
+* Recognize citext type as string on PostgreSQL (isc) (#710)
+
+* Support composite keys in the rcte_tree plugin (jeremyevans)
+
+* Support composite keys in the tree plugin (jeremyevans)
+
+* Make Migrator.migrator_class public (robertjpayne, jeremyevans) (#708)
+
+* Make PostgreSQL empty array literalization work correctly on PostgreSQL <8.4 (jeremyevans)
+
+* Add Sequel extensions guide (jeremyevans)
+
+* Add model plugins guide (jeremyevans)
+
+* Add error_sql Database extension, allowing DatabaseError#sql to return SQL query that caused underlying exception (jeremyevans)
+
+* Make Dataset#each_page in pagination extension return enumerator if no block is given (justinj) (#702)
+
+=== 4.2.0 (2013-09-01)
+
+* Support custom :flags option in mysql2 adapter (jeremyevans) (#700)
+
+* Add implementations of Dataset#freeze and Dataset#dup (jeremyevans)
+
+* Add implementations of Model#dup and Model#clone (jeremyevans)
+
+* Don't have partial_indexes returned by Database#indexes on MSSQL 2008+ (jeremyevans)
+
+* Support partial indexes on SQLite 3.8.0+ (jeremyevans)
+
+* Add Database#supports_partial_indexes? to check for partial index support (mluu, jeremyevans) (#698)
+
+* The static_cache plugin now disallows saving/destroying if the :frozen=>false option is not used (jeremyevans)
+
+* Support :frozen=>false option in static_cache plugin, for having new instances returned instead of frozen cached instances (jeremyevans)
+
+* Add pg_static_cache_updater Database extension for listening for changes to tables and updating static_cache caches automatically (jeremyevans)
+
+* Add mssql_emulate_lateral_with_apply extension for emulating LATERAL queries using CROSS/OUTER APPLY (jeremyevans)
+
+* Support LATERAL queries via Dataset#lateral (jeremyevans)
+
+* Add pg_loose_count Database extension, for fast approximate counts of PostgreSQL tables (jeremyevans)
+
+* Add from_block Database extension, for having Database#from block affect FROM instead of WHERE (jeremyevans)
+
+* Support :cursor_name option in postgres adapter Dataset#use_cursor (heeringa, jeremyevans) (#696)
+
+* Fix placeholder literal strings when used with an empty placeholder hash (trydionel, jeremyevans) (#695)
+
+=== 4.1.1 (2013-08-01)
+
+* Fix select_map, select_order_map, and single_value methods on eager_graphed datasets (jeremyevans)
+
+=== 4.1.0 (2013-08-01)
+
+* Support :inherits option in Database#create_table on PostgreSQL, for table inheritance (jeremyevans)
+
+* Handle dropping indexes for schema qualified tables on PostgreSQL (jeremyevans)
+
+* Add Database#error_info on PostgreSQL 9.3+ if pg-0.16.0+ is used, to get a hash of metadata for a given database exception (jeremyevans)
+
+* Allow prepared_statements plugin to work with instance_filters and update_primary_key plugins (jeremyevans)
+
+* Support deferrable exclusion constraints on PostgreSQL using the :deferrable option (mfoody) (#687)
+
+* Make Database#run and #<< accept SQL::PlaceholderLiteralString values (jeremyevans)
+
+* Deprecate :driver option in odbc adapter since it appears to be broken (jeremyevans)
+
+* Support :drvconnect option in odbc adapter for supplying the ODBC connection string directly (jeremyevans)
+
+* Support mysql2 0.3.12+ result streaming via Dataset#stream (jeremyevans)
+
+* Convert Java::JavaUtil::HashMap to ruby Hash in jdbc adapter, for better handling of PostgreSQL hstore type (jeremyevans) (#686)
+
+* Raise NoMatchingRow if calling add_association with a primary key value that doesn't match an existing row (jeremyevans)
+
+* Allow PostgreSQL add_constraint to support :not_valid option (jeremyevans)
+
+* Allow CHECK constraints to have options by using an options hash as the constraint name (jeremyevans)
+
+* Correctly raise error when using an invalid virtual row block function call (jeremyevans)
+
+* Support REPLACE on SQLite via Dataset#replace and #multi_replace (etehtsea) (#681)
+
 === 4.0.0 (2013-07-01)
 
 * Correctly parse composite primary keys on SQLite 3.7.16+ (jeremyevans)

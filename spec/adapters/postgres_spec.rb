@@ -17,8 +17,7 @@ describe "PostgreSQL", '#create_table' do
     DB.sqls.clear
   end
   after do
-    @db.drop_table?(:tmp_dolls)
-    @db.drop_table?(:unlogged_dolls)
+    @db.drop_table?(:tmp_dolls, :unlogged_dolls)
   end
 
   specify "should create a temporary table" do
@@ -35,10 +34,43 @@ describe "PostgreSQL", '#create_table' do
     end
   end
 
+  specify "should create a table inheriting from another table" do
+    @db.create_table(:unlogged_dolls){text :name}
+    @db.create_table(:tmp_dolls, :inherits=>:unlogged_dolls){}
+    @db[:tmp_dolls].insert('a')
+    @db[:unlogged_dolls].all.should == [{:name=>'a'}]
+  end
+
+  specify "should create a table inheriting from multiple tables" do
+    begin
+      @db.create_table(:unlogged_dolls){text :name}
+      @db.create_table(:tmp_dolls){text :bar}
+      @db.create_table!(:items, :inherits=>[:unlogged_dolls, :tmp_dolls]){text :foo}
+      @db[:items].insert(:name=>'a', :bar=>'b', :foo=>'c')
+      @db[:unlogged_dolls].all.should == [{:name=>'a'}]
+      @db[:tmp_dolls].all.should == [{:bar=>'b'}]
+      @db[:items].all.should == [{:name=>'a', :bar=>'b', :foo=>'c'}]
+    ensure
+      @db.drop_table?(:items)
+    end
+  end
+
   specify "should not allow to pass both :temp and :unlogged" do
     proc do
       @db.create_table(:temp_unlogged_dolls, :temp => true, :unlogged => true){text :name}
     end.should raise_error(Sequel::Error, "can't provide both :temp and :unlogged to create_table")
+  end
+
+  specify "should support pg_loose_count extension" do
+    @db.extension :pg_loose_count
+    @db.create_table(:tmp_dolls){text :name}
+    @db.loose_count(:tmp_dolls).should be_a_kind_of(Integer)
+    @db.loose_count(:tmp_dolls).should == 0
+    @db.loose_count(:public__tmp_dolls).should == 0
+    @db[:tmp_dolls].insert('a')
+    @db << 'VACUUM ANALYZE tmp_dolls'
+    @db.loose_count(:tmp_dolls).should == 1
+    @db.loose_count(:public__tmp_dolls).should == 1
   end
 end
 
@@ -232,6 +264,43 @@ describe "A PostgreSQL dataset" do
     proc{@db[:atest].insert(2)}.should raise_error(Sequel::Postgres::ExclusionConstraintViolation)
     @db.alter_table(:atest){drop_constraint 'atest_ex'}
   end if DB.server_version >= 90000
+  
+  specify "should support deferrable exclusion constraints" do
+    @db.create_table!(:atest){Integer :t; exclude [[Sequel.desc(:t, :nulls=>:last), '=']], :using=>:btree, :where=>proc{t > 0}, :deferrable => true}
+    proc do 
+      @db.transaction do
+        @db[:atest].insert(2)
+        proc{@db[:atest].insert(2)}.should_not raise_error
+      end
+    end.should raise_error(Sequel::Postgres::ExclusionConstraintViolation)
+  end if DB.server_version >= 90000
+
+  specify "should support Database#error_info for getting info hash on the given error" do
+    @db.create_table!(:atest){Integer :t; Integer :t2, :null=>false, :default=>1; constraint :f, :t=>0}
+    begin
+      @db[:atest].insert(1)
+    rescue => e
+    end
+    e.should_not be_nil
+    info = @db.error_info(e)
+    info[:schema].should == 'public'
+    info[:table].should == 'atest'
+    info[:constraint].should == 'f'
+    info[:column].should be_nil
+    info[:type].should be_nil
+
+    begin
+      @db[:atest].insert(0, nil)
+    rescue => e
+    end
+    e.should_not be_nil
+    info = @db.error_info(e.wrapped_exception)
+    info[:schema].should == 'public'
+    info[:table].should == 'atest'
+    info[:constraint].should be_nil
+    info[:column].should == 't2'
+    info[:type].should be_nil
+  end if DB.server_version >= 90300 && DB.adapter_scheme == :postgres && SEQUEL_POSTGRES_USES_PG && Object.const_defined?(:PG) && ::PG.const_defined?(:Constants) && ::PG::Constants.const_defined?(:PG_DIAG_SCHEMA_NAME)
 
   specify "should support Database#do for executing anonymous code blocks" do
     @db.drop_table?(:btest)
@@ -253,6 +322,19 @@ describe "A PostgreSQL dataset" do
     @db[:atest].where(:id=>1).update(:fk=>2)
     @db.alter_table(:atest){validate_constraint :atest_fk}
     proc{@db.alter_table(:atest){validate_constraint :atest_fk}}.should_not raise_error
+  end if DB.server_version >= 90200
+
+  specify "should support adding check constarints that are not yet valid, and validating them later" do
+    @db.create_table!(:atest){Integer :a}
+    @db[:atest].insert(5)
+    @db.alter_table(:atest){add_constraint({:name=>:atest_check, :not_valid=>true}){a >= 10}}
+    @db[:atest].insert(10)
+    proc{@db[:atest].insert(6)}.should raise_error(Sequel::DatabaseError)
+
+    proc{@db.alter_table(:atest){validate_constraint :atest_check}}.should raise_error(Sequel::DatabaseError)
+    @db[:atest].where{a < 10}.update(:a=>Sequel.+(:a, 10))
+    @db.alter_table(:atest){validate_constraint :atest_check}
+    proc{@db.alter_table(:atest){validate_constraint :atest_check}}.should_not raise_error
   end if DB.server_version >= 90200
 
   specify "should support :using when altering a column's type" do
@@ -927,6 +1009,13 @@ describe "Postgres::Database schema qualified tables" do
     @db.table_exists?(:schema_test__schema_test).should == true
   end
 
+  specify "should be able to add and drop indexes in a schema" do
+    @db.create_table(:schema_test__schema_test){Integer :i, :index=>true}
+    @db.indexes(:schema_test__schema_test).keys.should == [:schema_test_schema_test_i_index]
+    @db.drop_index :schema_test__schema_test, :i
+    @db.indexes(:schema_test__schema_test).keys.should == []
+  end
+
   specify "should be able to get primary keys for tables in a given schema" do
     @db.create_table(:schema_test__schema_test){primary_key :i}
     @db.primary_key(:schema_test__schema_test).should == 'i'
@@ -1332,6 +1421,21 @@ if DB.adapter_scheme == :postgres
       check_sqls do
         @db.sqls.length.should == 15
       end
+    end
+
+    specify "should respect the :cursor_name option" do
+      one_rows = []
+      two_rows = []
+      @ds.order(:x).use_cursor(:cursor_name => 'cursor_one').each do |one|
+        one_rows << one
+        if one[:x] % 1000 == 500 
+          two_rows = []
+          @ds.order(:x).use_cursor(:cursor_name => 'cursor_two').each do |two|
+            two_rows << two
+          end
+        end
+      end
+      one_rows.should == two_rows
     end
 
     specify "should handle returning inside block" do
@@ -1815,6 +1919,23 @@ describe 'PostgreSQL array handling' do
     if @native
       rs = @ds.all
       rs.should == [{:ba=>[Sequel.blob("a\0"), nil], :tz=>[t, nil], :o=>[1, 2, 3]}]
+      rs.first.values.each{|v| v.should_not be_a_kind_of(Array)}
+      rs.first.values.each{|v| v.to_a.should be_a_kind_of(Array)}
+      @ds.delete
+      @ds.insert(rs.first)
+      @ds.all.should == rs
+    end
+  end
+
+  specify 'insert and retrieve empty arrays' do
+    @db.create_table!(:items) do
+      column :n, 'integer[]'
+    end
+    @ds.insert(:n=>Sequel.pg_array([], :integer))
+    @ds.count.should == 1
+    if @native
+      rs = @ds.all
+      rs.should == [{:n=>[]}]
       rs.first.values.each{|v| v.should_not be_a_kind_of(Array)}
       rs.first.values.each{|v| v.to_a.should be_a_kind_of(Array)}
       @ds.delete
@@ -3058,3 +3179,46 @@ describe 'PostgreSQL row-valued/composite types' do
     end
   end
 end
+
+describe 'pg_static_cache_updater extension' do
+  before(:all) do
+    @db = DB
+    @db.extension :pg_static_cache_updater
+    @db.drop_function(@db.default_static_cache_update_name, :cascade=>true, :if_exists=>true)
+    @db.create_static_cache_update_function
+
+    @db.create_table!(:things) do
+      primary_key :id
+      String :name
+    end
+    @Thing = Class.new(Sequel::Model(:things))
+    @Thing.plugin :static_cache
+    @db.create_static_cache_update_trigger(:things)
+  end
+  after(:all) do
+    @db.drop_table(:things)
+    @db.drop_function(@db.default_static_cache_update_name)
+  end
+
+  specify "should reload model static cache when underlying table changes" do
+    @Thing.all.should == []
+    q = Queue.new
+    q1 = Queue.new
+
+    @db.listen_for_static_cache_updates(@Thing, :timeout=>0, :loop=>proc{q.push(nil); q1.pop.call})
+    q.pop
+    q1.push(proc{@db[:things].insert(1, 'A')})
+    q.pop
+    @Thing.all.should == [@Thing.load(:id=>1, :name=>'A')]
+
+    q1.push(proc{@db[:things].update(:name=>'B')})
+    q.pop
+    @Thing.all.should == [@Thing.load(:id=>1, :name=>'B')]
+
+    q1.push(proc{@db[:things].delete})
+    q.pop
+    @Thing.all.should == []
+
+    q1.push(proc{throw :stop})
+  end
+end if DB.adapter_scheme == :postgres && SEQUEL_POSTGRES_USES_PG && DB.server_version >= 90000

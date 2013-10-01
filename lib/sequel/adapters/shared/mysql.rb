@@ -1,4 +1,5 @@
 Sequel.require 'adapters/utils/split_alter_table'
+Sequel.require 'adapters/utils/replace'
 
 module Sequel
   Dataset::NON_SQL_OPTIONS << :insert_ignore
@@ -400,6 +401,7 @@ module Sequel
       # Handle MySQL specific index SQL syntax
       def index_definition_sql(table_name, index)
         index_name = quote_identifier(index[:name] || default_index_name(table_name, index[:columns]))
+        raise Error, "Partial indexes are not supported for this database" if index[:where] && !supports_partial_indexes?
         index_type = case index[:type]
         when :full_text
           "FULLTEXT "
@@ -532,7 +534,6 @@ module Sequel
       PAREN_CLOSE = Dataset::PAREN_CLOSE
       NOT_SPACE = Dataset::NOT_SPACE
       FROM = Dataset::FROM
-      INSERT = Dataset::INSERT
       COMMA = Dataset::COMMA
       LIMIT = Dataset::LIMIT
       GROUP_BY = Dataset::GROUP_BY
@@ -552,7 +553,6 @@ module Sequel
       EMPTY_COLUMNS = " ()".freeze
       EMPTY_VALUES = " VALUES ()".freeze
       IGNORE = " IGNORE".freeze
-      REPLACE = 'REPLACE'.freeze
       ON_DUPLICATE_KEY_UPDATE = " ON DUPLICATE KEY UPDATE ".freeze
       EQ_VALUES = '=VALUES('.freeze
       EQ = '='.freeze
@@ -564,8 +564,11 @@ module Sequel
       BACKSLASH_RE = /\\/.freeze
       QUAD_BACKSLASH = "\\\\\\\\".freeze
       BLOB_START = "0x".freeze
+      EMPTY_BLOB = "''".freeze
       HSTAR = "H*".freeze
-      
+
+      include Sequel::Dataset::Replace
+
       # MySQL specific syntax for LIKE/REGEXP searches, as well as
       # string concatenation.
       def complex_expression_sql_append(sql, op, args)
@@ -647,11 +650,6 @@ module Sequel
         SQL::PlaceholderLiteralString.new((opts[:boolean] ? MATCH_AGAINST_BOOLEAN : MATCH_AGAINST), [Array(cols), terms])
       end
 
-      # MySQL allows HAVING clause on ungrouped datasets.
-      def having(*cond, &block)
-        _filter(:having, *cond, &block)
-      end
-      
       # Transforms an CROSS JOIN to an INNER JOIN if the expr is not nil.
       # Raises an error on use of :full_outer type, since MySQL doesn't support it.
       def join_table(type, table, expr=nil, opts=OPTS, &block)
@@ -719,23 +717,7 @@ module Sequel
       def quoted_identifier_append(sql, c)
         sql << BACKTICK << c.to_s.gsub(BACKTICK_RE, DOUBLE_BACKTICK) << BACKTICK
       end
-      
-      # Execute a REPLACE statement on the database.
-      def replace(*values)
-        execute_insert(replace_sql(*values))
-      end
 
-      # MySQL specific syntax for REPLACE (aka UPSERT, or update if exists,
-      # insert if it doesn't).
-      def replace_sql(*values)
-        clone(:replace=>true).insert_sql(*values)
-      end
-
-      # Replace multiple rows in a single query.
-      def multi_replace(*values)
-        clone(:replace=>true).multi_insert(*values)
-      end
-      
       # MySQL can emulate DISTINCT ON with its non-standard GROUP BY implementation,
       # though the rows returned cannot be made deterministic through ordering.
       def supports_distinct_on?
@@ -832,11 +814,6 @@ module Sequel
         sql << IGNORE if opts[:update_ignore]
       end
 
-      # If this is an replace instead of an insert, use replace instead
-      def insert_insert_sql(sql)
-        sql << (@opts[:replace] ? REPLACE : INSERT)
-      end
-
       # MySQL supports INSERT ... ON DUPLICATE KEY UPDATE
       def insert_on_duplicate_key_update_sql(sql)
         if update_cols = opts[:on_duplicate_key_update]
@@ -897,7 +874,11 @@ module Sequel
 
       # MySQL uses a preceding X for hex escaping strings
       def literal_blob_append(sql, v)
-        sql << BLOB_START << v.unpack(HSTAR).first
+        if v.empty?
+          sql << EMPTY_BLOB
+        else
+          sql << BLOB_START << v.unpack(HSTAR).first
+        end
       end
 
       # Use 0 for false on MySQL
