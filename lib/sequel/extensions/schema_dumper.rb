@@ -134,6 +134,12 @@ END_MIG
         col_opts[:null] = false if schema[:allow_null] == false
         col_opts[:text] = true if (schema[:db_type] == 'nvarchar') and (schema[:max_chars] == -1)
 
+        if ['varchar','nvarchar'].include? schema[:db_type]
+          if schema.has_key?(:max_chars) and schema[:max_chars]>0
+            col_opts[:size] = schema[:max_chars]
+          end
+        end
+
         if schema[:db_type] == 'decimal' && schema.has_key?(:column_size)
           if schema.has_key?(:scale)
             col_opts[:size] = [schema[:column_size], schema[:scale]]
