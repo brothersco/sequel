@@ -38,7 +38,12 @@ module Sequel
     #   artist.update(:name=>'Bar')
     #   artist.column_changes        # => {}
     #   artist.previous_changes      # => {:name=>['Foo', 'Bar']}
-    # 
+    #
+    # There is one caveat; when used with a column that also uses the
+    # serialization plugin, setting the column back to its original value
+    # after changing it is not correctly detected and will leave an entry
+    # in changed_columns.
+    #
     # Usage:
     #
     #   # Make all model subclass instances record previous values (called before loading subclasses)
@@ -60,7 +65,7 @@ module Sequel
         #
         #   column_change(:name) # => ['Initial', 'Current']
         def column_change(column)
-          [initial_value(column), send(column)] if column_changed?(column)
+          [initial_value(column), get_column_value(column)] if column_changed?(column)
         end
 
         # A hash with column symbol keys and pairs of initial and
@@ -70,7 +75,7 @@ module Sequel
         def column_changes
           h = {}
           initial_values.each do |column, value|
-            h[column] = [value, send(column)]
+            h[column] = [value, get_column_value(column)]
           end
           h
         end
@@ -83,17 +88,6 @@ module Sequel
         #   column_changed?(:name) # => true
         def column_changed?(column)
           initial_values.has_key?(column)
-        end
-
-        # Duplicate internal data structures
-        def dup 
-          s = self
-          super.instance_eval do
-            @initial_values = s.initial_values.dup
-            @missing_initial_values = s.send(:missing_initial_values).dup
-            @previous_changes = s.previous_changes.dup if s.previous_changes
-            self
-          end
         end
 
         # Freeze internal data structures
@@ -110,7 +104,7 @@ module Sequel
         #
         #   initial_value(:name) # => 'Initial'
         def initial_value(column)
-          initial_values.fetch(column){send(column)}
+          initial_values.fetch(column){get_column_value(column)}
         end
 
         # A hash with column symbol keys and initial values.
@@ -127,7 +121,7 @@ module Sequel
         #   name # => 'Initial'
         def reset_column(column)
           if initial_values.has_key?(column)
-            send(:"#{column}=", initial_values[column])
+            set_column_value(:"#{column}=", initial_values[column])
           end
           if missing_initial_values.include?(column)
             values.delete(column)
@@ -147,7 +141,7 @@ module Sequel
           value = if initial_values.has_key?(column)
             initial_values[column]
           else
-            send(column)
+            get_column_value(column)
           end
 
           initial_values[column] = if value && value != true && value.respond_to?(:clone)
@@ -195,7 +189,7 @@ module Sequel
             end
           else
             check_missing_initial_value(column)
-            iv[column] = send(column)
+            iv[column] = get_column_value(column)
             super
           end
         end
@@ -207,6 +201,15 @@ module Sequel
           unless values.has_key?(column) || (miv = missing_initial_values).include?(column)
             miv << column
           end
+        end
+
+        # Duplicate internal data structures
+        def initialize_copy(other)
+          super
+          @initial_values = Hash[other.initial_values]
+          @missing_initial_values = other.send(:missing_initial_values).dup
+          @previous_changes = Hash[other.previous_changes] if other.previous_changes
+          self
         end
 
         # Reset the initial values when initializing.

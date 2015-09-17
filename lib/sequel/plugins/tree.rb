@@ -43,7 +43,7 @@ module Sequel
         children = chi.fetch(:name, :children)
 
         par[:reciprocal] = children
-        chi[:recripocal] = parent
+        chi[:reciprocal] = parent
 
         model.many_to_one parent, par
         model.one_to_many children, chi
@@ -70,7 +70,7 @@ module Sequel
         
         # Returns the dataset for retrieval of all root nodes
         #
-        #   TreeClass.roots_dataset => Sequel#Dataset
+        #   TreeClass.roots_dataset # => Sequel::Dataset instance
         def roots_dataset
           ds = where(Sequel.or(Array(parent_column).zip([])))
           ds = ds.order(*tree_order) if tree_order
@@ -88,12 +88,12 @@ module Sequel
           nodes
         end
 
-        # Returns list of ancestors, starting from parent until root.
+        # Returns list of descendants
         #
-        #   subchild1.ancestors # => [child1, root]
+        #   node.descendants # => [child1, child2, subchild1_1, subchild1_2, subchild2_1, subchild2_2]
         def descendants
           nodes = children.dup
-          nodes.each{|child| nodes.concat(child.descendants)}
+          children.each{|child| nodes.concat(child.descendants)}
           nodes 
         end
 

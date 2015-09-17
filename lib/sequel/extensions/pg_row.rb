@@ -1,7 +1,7 @@
 # The pg_row extension adds support for Sequel to handle
 # PostgreSQL's row-valued/composite types.
 #
-# This extension integrates with Sequel's native postgres adapter, so
+# This extension integrates with Sequel's native postgres and jdbc/postgresql adapters, so
 # that when composite fields are retrieved, they are parsed and returned
 # as instances of Sequel::Postgres::PGRow::(HashRow|ArrayRow), or
 # optionally a custom type.  HashRow and ArrayRow are DelegateClasses of
@@ -27,8 +27,8 @@
 #
 #   Sequel.pg_row(array)
 #
-# If you have loaded the {core_extensions extension}[link:files/doc/core_extensions_rdoc.html]),
-# or you have loaded the {core_refinements extension}[link:files/doc/core_refinements_rdoc.html])
+# If you have loaded the {core_extensions extension}[rdoc-ref:doc/core_extensions.rdoc],
+# or you have loaded the core_refinements extension
 # and have activated refinements for the file, you can also use Array#pg_row:
 #
 #   array.pg_row
@@ -74,9 +74,12 @@
 #   DB.conversion_procs.select{|k,v| v.is_a?(Sequel::Postgres::PGRow::Parser) && \
 #     v.converter && (v.converter.name.nil? || v.converter.name == '') }.map{|k,v| v}
 # 
-# If you are not using the native postgres adapter and are using composite types
+# If you are not using the native postgres or jdbc/postgresql adapters and are using composite types
 # types as model column values you probably should use the
 # pg_typecast_on_load plugin if the column values are returned as a string.
+#
+# See the {schema modification guide}[rdoc-ref:doc/schema_modification.rdoc]
+# for details on using row type columns in CREATE/ALTER TABLE statements.
 #
 # This extension requires both the strscan and delegate libraries.
 
@@ -442,7 +445,7 @@ module Sequel
           end
           # Manually cast to integer using to_i, because adapter may not cast oid type
           # correctly (e.g. swift)
-          parser_opts[:oid], rel_oid, array_oid = row.values_at(:oid, :typrelid, :typarray).map{|i| i.to_i}
+          parser_opts[:oid], rel_oid, array_oid = row.values_at(:oid, :typrelid, :typarray).map(&:to_i)
 
           # Get column names and oids for each of the members of the composite type.
           res = from(:pg_attribute).
@@ -496,6 +499,7 @@ module Sequel
             private meth
           end
 
+          conversion_procs_updated
           nil
         end
 

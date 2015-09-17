@@ -16,27 +16,26 @@ module Sequel
 
     # Which options don't affect the SQL generation.  Used by simple_select_all?
     # to determine if this is a simple SELECT * FROM table.
-    NON_SQL_OPTIONS = [:server, :defaults, :overrides, :graph, :eager_graph, :graph_aliases]
+    NON_SQL_OPTIONS = [:server, :defaults, :overrides, :graph, :eager, :eager_graph, :graph_aliases]
     
     # These symbols have _join methods created (e.g. inner_join) that
     # call join_table with the symbol, passing along the arguments and
     # block from the method call.
     CONDITIONED_JOIN_TYPES = [:inner, :full_outer, :right_outer, :left_outer, :full, :right, :left]
 
-    # These symbols have _join methods created (e.g. natural_join) that
-    # call join_table with the symbol.  They only accept a single table
-    # argument which is passed to join_table, and they raise an error
-    # if called with a block.
+    # These symbols have _join methods created (e.g. natural_join).
+    # They accept a table argument and options hash which is passed to join_table,
+    # and they raise an error if called with a block.
     UNCONDITIONED_JOIN_TYPES = [:natural, :natural_left, :natural_right, :natural_full, :cross]
     
     # All methods that return modified datasets with a joined table added.
     JOIN_METHODS = (CONDITIONED_JOIN_TYPES + UNCONDITIONED_JOIN_TYPES).map{|x| "#{x}_join".to_sym} + [:join, :join_table]
     
     # Methods that return modified datasets
-    QUERY_METHODS = (<<-METHS).split.map{|x| x.to_sym} + JOIN_METHODS
+    QUERY_METHODS = (<<-METHS).split.map(&:to_sym) + JOIN_METHODS
       add_graph_aliases and distinct except exclude exclude_having exclude_where
-      filter for_update from from_self graph grep group group_and_count group_by having intersect invert
-      limit lock_style naked or order order_append order_by order_more order_prepend qualify
+      filter for_update from from_self graph grep group group_and_count group_append group_by having intersect invert
+      limit lock_style naked offset or order order_append order_by order_more order_prepend qualify
       reverse reverse_order select select_all select_append select_group select_more server
       set_graph_aliases unfiltered ungraphed ungrouped union
       unlimited unordered where with with_recursive with_sql
@@ -68,31 +67,33 @@ module Sequel
       where(*cond, &block)
     end
     
-    # Returns a new clone of the dataset with with the given options merged.
+    # Returns a new clone of the dataset with the given options merged.
     # If the options changed include options in COLUMN_CHANGE_OPTS, the cached
     # columns are deleted.  This method should generally not be called
     # directly by user code.
     def clone(opts = nil)
       c = super()
       if opts
-        c.instance_variable_set(:@opts, @opts.merge(opts))
+        c.instance_variable_set(:@opts, Hash[@opts].merge!(opts))
         c.instance_variable_set(:@columns, nil) if @columns && !opts.each_key{|o| break if COLUMN_CHANGE_OPTS.include?(o)}
       else
-        c.instance_variable_set(:@opts, @opts.dup)
+        c.instance_variable_set(:@opts, Hash[@opts])
       end
       c
     end
 
-    # Returns a copy of the dataset with the SQL DISTINCT clause.
-    # The DISTINCT clause is used to remove duplicate rows from the
-    # output.  If arguments are provided, uses a DISTINCT ON clause,
-    # in which case it will only be distinct on those columns, instead
-    # of all returned columns.  Raises an error if arguments
-    # are given and DISTINCT ON is not supported.
+    # Returns a copy of the dataset with the SQL DISTINCT clause. The DISTINCT
+    # clause is used to remove duplicate rows from the output.  If arguments
+    # are provided, uses a DISTINCT ON clause, in which case it will only be
+    # distinct on those columns, instead of all returned columns. If a block
+    # is given, it is treated as a virtual row block, similar to +where+.
+    # Raises an error if arguments are given and DISTINCT ON is not supported.
     #
     #  DB[:items].distinct # SQL: SELECT DISTINCT * FROM items
     #  DB[:items].order(:id).distinct(:id) # SQL: SELECT DISTINCT ON (id) * FROM items ORDER BY id
-    def distinct(*args)
+    #  DB[:items].order(:id).distinct{func(:id)} # SQL: SELECT DISTINCT ON (func(id)) * FROM items ORDER BY id
+    def distinct(*args, &block)
+      virtual_row_columns(args, block)
       raise(InvalidOperation, "DISTINCT ON not supported") if !args.empty? && !supports_distinct_on?
       clone(:distinct => args)
     end
@@ -213,10 +214,13 @@ module Sequel
     #
     #   ds.from_self(:alias=>:foo)
     #   # SELECT * FROM (SELECT id, name FROM items ORDER BY name) AS foo
+    #
+    #   ds.from_self(:alias=>:foo, :column_aliases=>[:c1, :c2])
+    #   # SELECT * FROM (SELECT id, name FROM items ORDER BY name) AS foo(c1, c2)
     def from_self(opts=OPTS)
       fs = {}
       @opts.keys.each{|k| fs[k] = nil unless NON_SQL_OPTIONS.include?(k)}
-      clone(fs).from(opts[:alias] ? as(opts[:alias]) : self)
+      clone(fs).from(opts[:alias] ? as(opts[:alias], opts[:column_aliases]) : self)
     end
 
     # Match any of the columns to any of the patterns. The terms can be
@@ -237,19 +241,23 @@ module Sequel
     # Examples:
     #
     #   dataset.grep(:a, '%test%')
-    #   # SELECT * FROM items WHERE (a LIKE '%test%')
+    #   # SELECT * FROM items WHERE (a LIKE '%test%' ESCAPE '\')
     #
     #   dataset.grep([:a, :b], %w'%test% foo')
-    #   # SELECT * FROM items WHERE ((a LIKE '%test%') OR (a LIKE 'foo') OR (b LIKE '%test%') OR (b LIKE 'foo'))
+    #   # SELECT * FROM items WHERE ((a LIKE '%test%' ESCAPE '\') OR (a LIKE 'foo' ESCAPE '\')
+    #   #   OR (b LIKE '%test%' ESCAPE '\') OR (b LIKE 'foo' ESCAPE '\'))
     #
     #   dataset.grep([:a, :b], %w'%foo% %bar%', :all_patterns=>true)
-    #   # SELECT * FROM a WHERE (((a LIKE '%foo%') OR (b LIKE '%foo%')) AND ((a LIKE '%bar%') OR (b LIKE '%bar%')))
+    #   # SELECT * FROM a WHERE (((a LIKE '%foo%' ESCAPE '\') OR (b LIKE '%foo%' ESCAPE '\'))
+    #   #   AND ((a LIKE '%bar%' ESCAPE '\') OR (b LIKE '%bar%' ESCAPE '\')))
     #
     #   dataset.grep([:a, :b], %w'%foo% %bar%', :all_columns=>true)
-    #   # SELECT * FROM a WHERE (((a LIKE '%foo%') OR (a LIKE '%bar%')) AND ((b LIKE '%foo%') OR (b LIKE '%bar%')))
+    #   # SELECT * FROM a WHERE (((a LIKE '%foo%' ESCAPE '\') OR (a LIKE '%bar%' ESCAPE '\'))
+    #   #   AND ((b LIKE '%foo%' ESCAPE '\') OR (b LIKE '%bar%' ESCAPE '\')))
     #
     #   dataset.grep([:a, :b], %w'%foo% %bar%', :all_patterns=>true, :all_columns=>true)
-    #   # SELECT * FROM a WHERE ((a LIKE '%foo%') AND (b LIKE '%foo%') AND (a LIKE '%bar%') AND (b LIKE '%bar%'))
+    #   # SELECT * FROM a WHERE ((a LIKE '%foo%' ESCAPE '\') AND (b LIKE '%foo%' ESCAPE '\')
+    #   #   AND (a LIKE '%bar%' ESCAPE '\') AND (b LIKE '%bar%' ESCAPE '\'))
     def grep(columns, patterns, opts=OPTS)
       if opts[:all_patterns]
         conds = Array(patterns).map do |pat|
@@ -306,6 +314,17 @@ module Sequel
       select_group(*columns, &block).select_more(COUNT_OF_ALL_AS_COUNT)
     end
 
+    # Returns a copy of the dataset with the given columns added to the list of
+    # existing columns to group on. If no existing columns are present this
+    # method simply sets the columns as the initial ones to group on.
+    #
+    #   DB[:items].group_append(:b) # SELECT * FROM items GROUP BY b
+    #   DB[:items].group(:a).group_append(:b) # SELECT * FROM items GROUP BY a, b
+    def group_append(*columns, &block)
+      columns = @opts[:group] + columns if @opts[:group]
+      group(*columns, &block)
+    end
+
     # Adds the appropriate CUBE syntax to GROUP BY.
     def group_cube
       raise Error, "GROUP BY CUBE not supported on #{db.database_type}" unless supports_group_cube?
@@ -316,6 +335,12 @@ module Sequel
     def group_rollup
       raise Error, "GROUP BY ROLLUP not supported on #{db.database_type}" unless supports_group_rollup?
       clone(:group_options=>:rollup)
+    end
+
+    # Adds the appropriate GROUPING SETS syntax to GROUP BY.
+    def grouping_sets
+      raise Error, "GROUP BY GROUPING SETS not supported on #{db.database_type}" unless supports_grouping_sets?
+      clone(:group_options=>:"grouping sets")
     end
 
     # Returns a copy of the dataset with the HAVING conditions changed. See #where for argument types.
@@ -380,37 +405,42 @@ module Sequel
     #
     # Takes the following arguments:
     #
-    # * type - The type of join to do (e.g. :inner)
-    # * table - Depends on type:
-    #   * Dataset - a subselect is performed with an alias of tN for some value of N
-    #   * String, Symbol: table
-    # * expr - specifies conditions, depends on type:
-    #   * Hash, Array of two element arrays - Assumes key (1st arg) is column of joined table (unless already
-    #     qualified), and value (2nd arg) is column of the last joined or primary table (or the
-    #     :implicit_qualifier option).
-    #     To specify multiple conditions on a single joined table column, you must use an array.
-    #     Uses a JOIN with an ON clause.
-    #   * Array - If all members of the array are symbols, considers them as columns and 
-    #     uses a JOIN with a USING clause.  Most databases will remove duplicate columns from
-    #     the result set if this is used.
-    #   * nil - If a block is not given, doesn't use ON or USING, so the JOIN should be a NATURAL
-    #     or CROSS join. If a block is given, uses an ON clause based on the block, see below.
-    #   * Everything else - pretty much the same as a using the argument in a call to where,
-    #     so strings are considered literal, symbols specify boolean columns, and Sequel
-    #     expressions can be used. Uses a JOIN with an ON clause.
-    # * options - a hash of options, with any of the following keys:
-    #   * :table_alias - the name of the table's alias when joining, necessary for joining
-    #     to the same table more than once.  No alias is used by default.
-    #   * :implicit_qualifier - The name to use for qualifying implicit conditions.  By default,
-    #     the last joined or primary table is used.
-    #   * :qualify - Can be set to false to not do any implicit qualification.  Can be set
-    #     to :deep to use the Qualifier AST Transformer, which will attempt to qualify
-    #     subexpressions of the expression tree.  Can be set to :symbol to only qualify
-    #     symbols. Defaults to the value of default_join_table_qualification.
-    # * block - The block argument should only be given if a JOIN with an ON clause is used,
-    #   in which case it yields the table alias/name for the table currently being joined,
-    #   the table alias/name for the last joined (or first table), and an array of previous
-    #   SQL::JoinClause. Unlike +where+, this block is not treated as a virtual row block.
+    # type :: The type of join to do (e.g. :inner)
+    # table :: table to join into the current dataset.  Generally one of the following types:
+    #          String, Symbol :: identifier used as table or view name
+    #          Dataset :: a subselect is performed with an alias of tN for some value of N
+    #          SQL::Function :: set returning function
+    #          SQL::AliasedExpression :: already aliased expression.  Uses given alias unless
+    #                                    overridden by the :table_alias option.
+    # expr :: conditions used when joining, depends on type:
+    #         Hash, Array of pairs :: Assumes key (1st arg) is column of joined table (unless already
+    #                                 qualified), and value (2nd arg) is column of the last joined or
+    #                                 primary table (or the :implicit_qualifier option).
+    #                                 To specify multiple conditions on a single joined table column,
+    #                                 you must use an array.  Uses a JOIN with an ON clause.
+    #         Array :: If all members of the array are symbols, considers them as columns and 
+    #                  uses a JOIN with a USING clause.  Most databases will remove duplicate columns from
+    #                  the result set if this is used.
+    #         nil :: If a block is not given, doesn't use ON or USING, so the JOIN should be a NATURAL
+    #                or CROSS join. If a block is given, uses an ON clause based on the block, see below.
+    #         otherwise :: Treats the argument as a filter expression, so strings are considered literal, symbols
+    #                      specify boolean columns, and Sequel expressions can be used. Uses a JOIN with an ON clause.
+    # options :: a hash of options, with the following keys supported:
+    #            :table_alias :: Override the table alias used when joining.  In general you shouldn't use this
+    #                            option, you should provide the appropriate SQL::AliasedExpression as the table
+    #                            argument.
+    #            :implicit_qualifier :: The name to use for qualifying implicit conditions.  By default,
+    #                                   the last joined or primary table is used.
+    #            :reset_implicit_qualifier :: Can set to false to ignore this join when future joins determine qualifier
+    #                                         for implicit conditions.
+    #            :qualify :: Can be set to false to not do any implicit qualification.  Can be set
+    #                        to :deep to use the Qualifier AST Transformer, which will attempt to qualify
+    #                        subexpressions of the expression tree.  Can be set to :symbol to only qualify
+    #                        symbols. Defaults to the value of default_join_table_qualification.
+    # block :: The block argument should only be given if a JOIN with an ON clause is used,
+    #          in which case it yields the table alias/name for the table currently being joined,
+    #          the table alias/name for the last joined (or first table), and an array of previous
+    #          SQL::JoinClause. Unlike +where+, this block is not treated as a virtual row block.
     #
     # Examples:
     #
@@ -445,23 +475,33 @@ module Sequel
       last_alias = options[:implicit_qualifier]
       qualify_type = options[:qualify]
 
-      if table.is_a?(Dataset)
+      if table.is_a?(SQL::AliasedExpression)
+        table_expr = if table_alias
+          SQL::AliasedExpression.new(table.expression, table_alias, table.columns)
+        else
+          table
+        end
+        table = table_expr.expression
+        table_name = table_alias = table_expr.alias
+      elsif table.is_a?(Dataset)
         if table_alias.nil?
           table_alias_num = (@opts[:num_dataset_sources] || 0) + 1
           table_alias = dataset_alias(table_alias_num)
         end
         table_name = table_alias
+        table_expr = SQL::AliasedExpression.new(table, table_alias)
       else
         table, implicit_table_alias = split_alias(table)
         table_alias ||= implicit_table_alias
         table_name = table_alias || table
+        table_expr = table_alias ? SQL::AliasedExpression.new(table, table_alias) : table
       end
 
       join = if expr.nil? and !block
-        SQL::JoinClause.new(type, table, table_alias)
+        SQL::JoinClause.new(type, table_expr)
       elsif using_join
         raise(Sequel::Error, "can't use a block if providing an array of symbols as expr") if block
-        SQL::JoinUsingClause.new(expr, type, table, table_alias)
+        SQL::JoinUsingClause.new(expr, type, table_expr)
       else
         last_alias ||= @opts[:last_joined_table] || first_source_alias
         if Sequel.condition_specifier?(expr)
@@ -485,10 +525,11 @@ module Sequel
           expr2 = yield(table_name, last_alias, @opts[:join] || [])
           expr = expr ? SQL::BooleanExpression.new(:AND, expr, expr2) : expr2
         end
-        SQL::JoinOnClause.new(expr, type, table, table_alias)
+        SQL::JoinOnClause.new(expr, type, table_expr)
       end
 
-      opts = {:join => (@opts[:join] || []) + [join], :last_joined_table => table_name}
+      opts = {:join => (@opts[:join] || []) + [join]}
+      opts[:last_joined_table] = table_name unless options[:reset_implicit_qualifier] == false
       opts[:num_dataset_sources] = table_alias_num if table_alias_num
       clone(opts)
     end
@@ -497,7 +538,13 @@ module Sequel
       class_eval("def #{jtype}_join(*args, &block); join_table(:#{jtype}, *args, &block) end", __FILE__, __LINE__)
     end
     UNCONDITIONED_JOIN_TYPES.each do |jtype|
-      class_eval("def #{jtype}_join(table); raise(Sequel::Error, '#{jtype}_join does not accept join table blocks') if block_given?; join_table(:#{jtype}, table) end", __FILE__, __LINE__)
+      class_eval(<<-END, __FILE__, __LINE__+1)
+        def #{jtype}_join(table, opts=Sequel::OPTS)
+          raise(Sequel::Error, '#{jtype}_join does not accept join table blocks') if block_given?
+          raise(Sequel::Error, '#{jtype}_join 2nd argument should be an options hash, not conditions') unless opts.is_a?(Hash)
+          join_table(:#{jtype}, table, nil, opts)
+        end
+      END
     end
 
     # Marks this dataset as a lateral dataset.  If used in another dataset's FROM
@@ -524,6 +571,7 @@ module Sequel
       return from_self.limit(l, o) if @opts[:sql]
 
       if l.is_a?(Range)
+        no_offset = false
         o = l.first
         l = l.last - l.first + (l.exclude_end? ? 0 : 1)
       end
@@ -531,17 +579,10 @@ module Sequel
       if l.is_a?(Integer)
         raise(Error, 'Limits must be greater than or equal to 1') unless l >= 1
       end
-      opts = {:limit => l}
-      if o
-        o = o.to_i if o.is_a?(String) && !o.is_a?(LiteralString)
-        if o.is_a?(Integer)
-          raise(Error, 'Offsets must be greater than or equal to 0') unless o >= 0
-        end
-        opts[:offset] = o
-      elsif !no_offset
-        opts[:offset] = nil
-      end
-      clone(opts)
+
+      ds = clone(:limit=>l)
+      ds = ds.offset(o) unless no_offset
+      ds
     end
     
     # Returns a cloned dataset with the given lock style.  If style is a
@@ -552,7 +593,10 @@ module Sequel
     # A symbol may be used for database independent locking behavior, but
     # all supported symbols have separate methods (e.g. for_update).
     #
-    #   DB[:items].lock_style('FOR SHARE NOWAIT') # SELECT * FROM items FOR SHARE NOWAIT
+    #   DB[:items].lock_style('FOR SHARE NOWAIT')
+    #   # SELECT * FROM items FOR SHARE NOWAIT
+    #   DB[:items].lock_style('FOR UPDATE OF table1 SKIP LOCKED')
+    #   # SELECT * FROM items FOR UPDATE OF table1 SKIP LOCKED
     def lock_style(style)
       clone(:lock => style)
     end
@@ -560,13 +604,26 @@ module Sequel
     # Returns a cloned dataset without a row_proc.
     #
     #   ds = DB[:items]
-    #   ds.row_proc = proc{|r| r.invert}
+    #   ds.row_proc = proc(&:invert)
     #   ds.all # => [{2=>:id}]
     #   ds.naked.all # => [{:id=>2}]
     def naked
       ds = clone
       ds.row_proc = nil
       ds
+    end
+
+    # Returns a copy of the dataset with a specified order. Can be safely combined with limit.
+    # If you call limit with an offset, it will override override the offset if you've called
+    # offset first.
+    #
+    #   DB[:items].offset(10) # SELECT * FROM items OFFSET 10
+    def offset(o)
+      o = o.to_i if o.is_a?(String) && !o.is_a?(LiteralString)
+      if o.is_a?(Integer)
+        raise(Error, 'Offsets must be greater than or equal to 0') unless o >= 0
+      end
+      clone(:offset => o)
     end
     
     # Adds an alternate filter to an existing filter using OR. If no filter 
@@ -659,6 +716,7 @@ module Sequel
     #   DB[:items].returning(nil) # RETURNING NULL
     #   DB[:items].returning(:id, :name) # RETURNING id, name
     def returning(*values)
+      raise Error, "RETURNING is not supported on #{db.database_type}" unless supports_returning?(:insert)
       clone(:returning=>values)
     end
 
@@ -756,6 +814,17 @@ module Sequel
       clone(:server=>servr)
     end
 
+    # If the database uses sharding and the current dataset has not had a
+    # server set, return a cloned dataset that uses the given server.
+    # Otherwise, return the receiver directly instead of returning a clone.
+    def server?(server)
+      if db.sharded? && !opts[:server]
+        server(server)
+      else
+        self
+      end
+    end
+
     # Unbind bound variables from this dataset's filter and return an array of two
     # objects.  The first object is a modified dataset where the filter has been
     # replaced with one that uses bound variable placeholders.  The second object
@@ -826,23 +895,23 @@ module Sequel
     # 
     # Accepts the following argument types:
     #
-    # * Hash - list of equality/inclusion expressions
-    # * Array - depends:
-    #   * If first member is a string, assumes the rest of the arguments
-    #     are parameters and interpolates them into the string.
-    #   * If all members are arrays of length two, treats the same way
-    #     as a hash, except it allows for duplicate keys to be
-    #     specified.
-    #   * Otherwise, treats each argument as a separate condition.
-    # * String - taken literally
-    # * Symbol - taken as a boolean column argument (e.g. WHERE active)
-    # * Sequel::SQL::BooleanExpression - an existing condition expression,
-    #   probably created using the Sequel expression filter DSL.
+    # Hash :: list of equality/inclusion expressions
+    # Array :: depends:
+    #          * If first member is a string, assumes the rest of the arguments
+    #            are parameters and interpolates them into the string.
+    #          * If all members are arrays of length two, treats the same way
+    #            as a hash, except it allows for duplicate keys to be
+    #            specified.
+    #          * Otherwise, treats each argument as a separate condition.
+    # String :: taken literally
+    # Symbol :: taken as a boolean column argument (e.g. WHERE active)
+    # Sequel::SQL::BooleanExpression :: an existing condition expression,
+    #                                   probably created using the Sequel expression filter DSL.
     #
     # where also accepts a block, which should return one of the above argument
     # types, and is treated the same way.  This block yields a virtual row object,
     # which is easy to use to create identifiers and functions.  For more details
-    # on the virtual row support, see the {"Virtual Rows" guide}[link:files/doc/virtual_rows_rdoc.html]
+    # on the virtual row support, see the {"Virtual Rows" guide}[rdoc-ref:doc/virtual_rows.rdoc]
     #
     # If both a block and regular argument are provided, they get ANDed together.
     #
@@ -871,7 +940,7 @@ module Sequel
     #   software = dataset.where(:category => 'software').where{price < 100}
     #   # SELECT * FROM items WHERE ((category = 'software') AND (price < 100))
     #
-    # See the the {"Dataset Filtering" guide}[link:files/doc/dataset_filtering_rdoc.html] for more examples and details.
+    # See the {"Dataset Filtering" guide}[rdoc-ref:doc/dataset_filtering.rdoc] for more examples and details.
     def where(*cond, &block)
       _filter(:where, *cond, &block)
     end
@@ -883,14 +952,14 @@ module Sequel
     # :recursive :: Specify that this is a recursive CTE
     #
     #   DB[:items].with(:items, DB[:syx].where(:name.like('A%')))
-    #   # WITH items AS (SELECT * FROM syx WHERE (name LIKE 'A%')) SELECT * FROM items
+    #   # WITH items AS (SELECT * FROM syx WHERE (name LIKE 'A%' ESCAPE '\')) SELECT * FROM items
     def with(name, dataset, opts=OPTS)
-      raise(Error, 'This datatset does not support common table expressions') unless supports_cte?
+      raise(Error, 'This dataset does not support common table expressions') unless supports_cte?
       if hoist_cte?(dataset)
         s, ds = hoist_cte(dataset)
         s.with(name, ds, opts)
       else
-        clone(:with=>(@opts[:with]||[]) + [opts.merge(:name=>name, :dataset=>dataset)])
+        clone(:with=>(@opts[:with]||[]) + [Hash[opts].merge!(:name=>name, :dataset=>dataset)])
       end
     end
 
@@ -919,7 +988,7 @@ module Sequel
         s, ds = hoist_cte(recursive)
         s.with_recursive(name, nonrecursive, ds, opts)
       else
-        clone(:with=>(@opts[:with]||[]) + [opts.merge(:recursive=>true, :name=>name, :dataset=>nonrecursive.union(recursive, {:all=>opts[:union_all] != false, :from_self=>false}))])
+        clone(:with=>(@opts[:with]||[]) + [Hash[opts].merge!(:recursive=>true, :name=>name, :dataset=>nonrecursive.union(recursive, {:all=>opts[:union_all] != false, :from_self=>false}))])
       end
     end
     
@@ -952,7 +1021,7 @@ module Sequel
         s, ds = hoist_cte(dataset)
         return s.compound_clone(type, ds, opts)
       end
-      ds = compound_from_self.clone(:compounds=>Array(@opts[:compounds]).map{|x| x.dup} + [[type, dataset.compound_from_self, opts[:all]]])
+      ds = compound_from_self.clone(:compounds=>Array(@opts[:compounds]).map(&:dup) + [[type, dataset.compound_from_self, opts[:all]]])
       opts[:from_self] == false ? ds : ds.from_self(opts)
     end
 
@@ -961,10 +1030,24 @@ module Sequel
       !(@opts.collect{|k,v| k unless v.nil?}.compact & opts).empty?
     end
 
-    # Whether this dataset is a simple SELECT * FROM table.
+    # Whether this dataset is a simple select from an underlying table, such as:
+    #
+    #   SELECT * FROM table
+    #   SELECT table.* FROM table
     def simple_select_all?
       o = @opts.reject{|k,v| v.nil? || NON_SQL_OPTIONS.include?(k)}
-      o.length == 1 && (f = o[:from]) && f.length == 1 && (f.first.is_a?(Symbol) || f.first.is_a?(SQL::AliasedExpression))
+      if (f = o[:from]) && f.length == 1 && (f.first.is_a?(Symbol) || f.first.is_a?(SQL::AliasedExpression))
+        case o.length
+        when 1
+          true
+        when 2
+          (s = o[:select]) && s.length == 1 && s.first.is_a?(SQL::ColumnAll)
+        else
+          false
+        end
+      else
+        false
+      end
     end
 
     private
@@ -996,11 +1079,13 @@ module Sequel
     # SQL expression object based on the expr type.  See +where+.
     def filter_expr(expr = nil, &block)
       expr = nil if expr == []
+
       if expr && block
         return SQL::BooleanExpression.new(:AND, filter_expr(expr), filter_expr(block))
       elsif block
         expr = block
       end
+
       case expr
       when Hash
         SQL::BooleanExpression.from_value_pairs(expr)
@@ -1014,10 +1099,8 @@ module Sequel
         end
       when Proc
         filter_expr(Sequel.virtual_row(&expr))
-      when SQL::NumericExpression, SQL::StringExpression
-        raise(Error, "Invalid SQL Expression type: #{expr.inspect}") 
-      when Symbol, SQL::Expression
-        expr
+      when Numeric, SQL::NumericExpression, SQL::StringExpression
+        raise(Error, "Invalid filter expression: #{expr.inspect}") 
       when TrueClass, FalseClass
         if supports_where_true?
           SQL::BooleanExpression.new(:NOOP, expr)
@@ -1028,8 +1111,10 @@ module Sequel
         end
       when String
         LiteralString.new("(#{expr})")
+      when PlaceholderLiteralizer::Argument
+        expr.transform{|v| filter_expr(v)}
       else
-        raise(Error, "Invalid filter argument: #{expr.inspect}")
+        expr
       end
     end
     
@@ -1065,7 +1150,7 @@ module Sequel
     # Return self if the dataset already has a server, or a cloned dataset with the
     # default server otherwise.
     def default_server
-      @opts[:server] ? self : clone(:server=>:default)
+      server?(:default)
     end
 
     # Treat the +block+ as a virtual_row block if not +nil+ and

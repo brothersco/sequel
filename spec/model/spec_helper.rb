@@ -5,26 +5,9 @@ unless Object.const_defined?('Sequel') && Sequel.const_defined?('Model')
 end
 Sequel::Deprecation.backtrace_filter = lambda{|line, lineno| lineno < 4 || line =~ /_spec\.rb/}
 
-
-(defined?(RSpec) ? RSpec::Core::ExampleGroup : Spec::Example::ExampleGroup).class_eval do
-  if ENV['SEQUEL_DEPRECATION_WARNINGS']
-    class << self
-      alias qspecify specify
-    end
-  else
-    def self.qspecify(*a, &block)
-      specify(*a) do
-        begin
-          output = Sequel::Deprecation.output
-          Sequel::Deprecation.output = false
-          instance_exec(&block)
-        ensure
-          Sequel::Deprecation.output = output 
-        end
-      end
-    end
-  end
-end
+gem 'minitest'
+require 'minitest/autorun'
+require 'minitest/hooks/default'
 
 Sequel.quote_identifiers = false
 Sequel.identifier_input_method = nil
@@ -57,4 +40,7 @@ if ENV['SEQUEL_COLUMNS_INTROSPECTION']
   Sequel.extension :columns_introspection
   Sequel::Database.extension :columns_introspection
   Sequel::Mock::Dataset.send(:include, Sequel::ColumnsIntrospection)
+end
+if ENV['SEQUEL_NO_CACHE_ASSOCIATIONS']
+  Sequel::Model.cache_associations = false
 end

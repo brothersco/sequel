@@ -15,7 +15,7 @@ module Sequel
       
       ORACLE_TYPES = {
         :blob=>lambda{|b| Sequel::SQL::Blob.new(b.read)},
-        :clob=>lambda{|b| b.read}
+        :clob=>lambda(&:read)
       }
 
       # Hash of conversion procs for this database.
@@ -111,7 +111,6 @@ module Sequel
         'decimal'.freeze=>Float, 'date'.freeze=>Time, 'datetime'.freeze=>Time,
         'time'.freeze=>Time, 'boolean'.freeze=>String, 'blob'.freeze=>OCI8::BLOB}
       def cursor_bind_params(conn, cursor, args)
-        cursor
         i = 0
         args.map do |arg, type|
           i += 1
@@ -143,6 +142,7 @@ module Sequel
       end
 
       def database_specific_error_class(exception, opts)
+        return super unless exception.respond_to?(:code)
         case exception.code
         when 1400, 1407
           NotNullConstraintViolation
@@ -272,7 +272,7 @@ module Sequel
 
         # Default values
         defaults = begin
-          metadata_dataset.from(:user_tab_cols).
+          metadata_dataset.from(:all_tab_cols).
             where(:table_name=>im.call(table)).
             to_hash(:column_name, :data_default)
         rescue DatabaseError
@@ -291,7 +291,7 @@ module Sequel
               :primary_key => pks.include?(column.name),
               :default => defaults[column.name],
               :oci8_type => column.data_type,
-              :db_type => column.type_string.split(' ')[0],
+              :db_type => column.type_string,
               :type_string => column.type_string,
               :charset_form => column.charset_form,
               :char_used => column.char_used?,
@@ -304,6 +304,8 @@ module Sequel
               :allow_null => column.nullable?
           }
           h[:type] = oracle_column_type(h)
+          h[:auto_increment] = h[:type] == :integer if h[:primary_key]
+          h[:max_length] = h[:char_size] if h[:type] == :string
           table_schema << [m.call(column.name), h]
         end
         table_schema
@@ -346,52 +348,9 @@ module Sequel
         end
       end
       
-      # Oracle prepared statement uses a new prepared statement each time
-      # it is called, but it does use the bind arguments.
-      module BindArgumentMethods
-        include ArgumentMapper
+      BindArgumentMethods = prepared_statements_module(:bind, ArgumentMapper)
+      PreparedStatementMethods = prepared_statements_module(:prepare, BindArgumentMethods)
 
-        private
-        
-        # Run execute_select on the database with the given SQL and the stored
-        # bind arguments.
-        def execute(sql, opts=OPTS, &block)
-          super(prepared_sql, {:arguments=>bind_arguments}.merge(opts), &block)
-        end
-        
-        # Same as execute, explicit due to intricacies of alias and super.
-        def execute_dui(sql, opts=OPTS, &block)
-          super(prepared_sql, {:arguments=>bind_arguments}.merge(opts), &block)
-        end
-        
-        # Same as execute, explicit due to intricacies of alias and super.
-        def execute_insert(sql, opts=OPTS, &block)
-          super(prepared_sql, {:arguments=>bind_arguments}.merge(opts), &block)
-        end
-      end
-
-      module PreparedStatementMethods
-        include BindArgumentMethods
-          
-        private
-          
-        # Execute the stored prepared statement name and the stored bind
-        # arguments instead of the SQL given.
-        def execute(sql, opts=OPTS, &block)
-          super(prepared_statement_name, opts, &block)
-        end
-         
-        # Same as execute, explicit due to intricacies of alias and super.
-        def execute_dui(sql, opts=OPTS, &block)
-          super(prepared_statement_name, opts, &block)
-        end
-          
-        # Same as execute, explicit due to intricacies of alias and super.
-        def execute_insert(sql, opts=OPTS, &block)
-          super(prepared_statement_name, opts, &block)
-        end
-      end
-        
       # Execute the given type of statement with the hash of values.
       def call(type, bind_vars={}, *values, &block)
         ps = to_prepared_statement(type, values)

@@ -32,7 +32,7 @@ convert to database types:
     String :a3, :fixed=>true            # char(255)
     String :a4, :fixed=>true, :size=>50 # char(50)
     String :a5, :text=>true             # text
-    File :b,                            # blob
+    File :b                             # blob
     Fixnum :c                           # integer
     Bignum :d                           # bigint
     Float :e                            # double precision
@@ -142,7 +142,7 @@ as it's third argument.  A simple example is:
 
 +foreign_key+ accepts the same options as +column+.  For example, to have a unique foreign key with varchar(16) type:
 
-  foreign_key :column_name, :unique=>true, :type=>'varchar(16)'
+  foreign_key :column_name, :table, :unique=>true, :type=>'varchar(16)'
 
 +foreign_key+ also accepts some specific options:
 
@@ -586,7 +586,7 @@ the table if the table already exists.  On some databases, it uses
 <tt>IF NOT EXISTS</tt>, on others it does a separate query to check for
 existence.
 
-This should not be used inside migrations, as if the the tbale does not
+This should not be used inside migrations, as if the table does not
 exist, it may mess up the migration.
 
 === +rename_table+

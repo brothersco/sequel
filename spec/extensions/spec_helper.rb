@@ -1,12 +1,9 @@
 require 'rubygems'
 
-if defined?(RSpec)
-  begin
-    require 'rspec/expectations'
-  rescue LoadError
-    nil
-  end
-end
+gem 'minitest'
+require 'minitest/autorun'
+require 'minitest/hooks/default'
+require 'minitest/shared_description'
 
 if ENV['COVERAGE']
   require File.join(File.dirname(File.expand_path(__FILE__)), "../sequel_coverage")
@@ -31,30 +28,10 @@ rescue LoadError
 end
 
 Sequel.extension :meta_def
-Sequel.extension :core_refinements if RUBY_VERSION >= '2.0.0'
+Sequel.extension :core_refinements if RUBY_VERSION >= '2.0.0' && RUBY_ENGINE == 'ruby'
 
 def skip_warn(s)
   warn "Skipping test of #{s}" if ENV["SKIPPED_TEST_WARN"]
-end
-
-(defined?(RSpec) ? RSpec::Core::ExampleGroup : Spec::Example::ExampleGroup).class_eval do
-  if ENV['SEQUEL_DEPRECATION_WARNINGS']
-    class << self
-      alias qspecify specify
-    end
-  else
-    def self.qspecify(*a, &block)
-      specify(*a) do
-        begin
-          output = Sequel::Deprecation.output
-          Sequel::Deprecation.output = false
-          instance_exec(&block)
-        ensure
-          Sequel::Deprecation.output = output 
-        end
-      end
-    end
-  end
 end
 
 Sequel.quote_identifiers = false
@@ -88,4 +65,7 @@ if ENV['SEQUEL_COLUMNS_INTROSPECTION']
   Sequel.extension :columns_introspection
   Sequel::Database.extension :columns_introspection
   Sequel::Mock::Dataset.send(:include, Sequel::ColumnsIntrospection)
+end
+if ENV['SEQUEL_NO_CACHE_ASSOCIATIONS']
+  Sequel::Model.cache_associations = false
 end

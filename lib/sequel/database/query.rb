@@ -6,7 +6,7 @@ module Sequel
     # ---------------------
 
     STRING_DEFAULT_RE = /\A'(.*)'\z/
-    CURRENT_TIMESTAMP_RE = /now|CURRENT|getdate|\ADate\(\)\z/io
+    CURRENT_TIMESTAMP_RE = /now|today|CURRENT|getdate|\ADate\(\)\z/io
     COLUMN_SCHEMA_DATETIME_TYPES = [:date, :datetime]
     COLUMN_SCHEMA_STRING_TYPES = [:string, :blob, :date, :datetime, :time, :enum, :set, :interval]
 
@@ -91,7 +91,8 @@ module Sequel
     #
     # :allow_null :: Whether NULL is an allowed value for the column.
     # :db_type :: The database type for the column, as a database specific string.
-    # :default :: The database default for the column, as a database specific string.
+    # :default :: The database default for the column, as a database specific string, or nil if there is
+    #             no default value.
     # :primary_key :: Whether the columns is a primary key column.  If this column is not present,
     #                 it means that primary key information is unavailable, not that the column
     #                 is not a primary key.
@@ -157,7 +158,24 @@ module Sequel
 
       cols = schema_parse_table(table_name, opts)
       raise(Error, 'schema parsing returned no columns, table probably doesn\'t exist') if cols.nil? || cols.empty?
-      cols.each{|_,c| c[:ruby_default] = column_schema_to_ruby_default(c[:default], c[:type])}
+
+      primary_keys = 0
+      auto_increment_set = false
+      cols.all? do |_,c|
+        auto_increment_set = true if c.has_key?(:auto_increment)
+        primary_keys += 1 if c[:primary_key]
+      end
+
+      cols.each do |_,c|
+        c[:ruby_default] = column_schema_to_ruby_default(c[:default], c[:type]) unless c.has_key?(:ruby_default)
+        if c[:primary_key] && !auto_increment_set
+          # If adapter didn't set it, assume that integer primary keys are auto incrementing
+          c[:auto_increment] = primary_keys == 1 && !!(c[:db_type] =~ /int/io)
+        end
+        if !c[:max_length] && c[:type] == :string && (max_length = column_schema_max_length(c[:db_type]))
+          c[:max_length] = max_length
+        end
+      end
       Sequel.synchronize{@schemas[quoted_name] = cols} if cache_schema
       cols
     end
@@ -251,6 +269,14 @@ module Sequel
       column_schema_default_to_ruby_value(default, type) rescue nil
     end
 
+    # Look at the db_type and guess the maximum length of the column.
+    # This assumes types such as varchar(255).
+    def column_schema_max_length(db_type)
+      if db_type =~ /\((\d+)\)/
+        $1.to_i
+      end
+    end
+
     # Return a Method object for the dataset's output_identifier_method.
     # Used in metadata parsing to make sure the returned information is in the
     # correct format.
@@ -279,7 +305,10 @@ module Sequel
 
     # Remove the cached schema for the given schema name
     def remove_cached_schema(table)
-      Sequel.synchronize{@schemas.delete(quote_schema_table(table))} if @schemas
+      if @schemas
+        k = quote_schema_table(table)
+        Sequel.synchronize{@schemas.delete(k)}
+      end
     end
     
     # Match the database's column type to a ruby type via a

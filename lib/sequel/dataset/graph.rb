@@ -2,9 +2,9 @@ module Sequel
   class Dataset
     # ---------------------
     # :section: 5 - Methods related to dataset graphing
-    # Dataset graphing changes the dataset to yield hashes where keys are table
-    # name symbols and values are hashes representing the columns related to
-    # that table.  All of these methods return modified copies of the receiver.
+    # Dataset graphing automatically creates unique aliases columns in join
+    # tables that overlap with already selected column aliases. 
+    # All of these methods return modified copies of the receiver.
     # ---------------------
     
     # Adds the given graph aliases to the list of graph aliases to use,
@@ -18,7 +18,7 @@ module Sequel
         raise Error, "cannot call add_graph_aliases on a dataset that has not been called with graph or set_graph_aliases"
       end
       columns, graph_aliases = graph_alias_columns(graph_aliases)
-      select_more(*columns).clone(:graph_aliases => ga.merge(graph_aliases))
+      select_more(*columns).clone(:graph_aliases => Hash[ga].merge!(graph_aliases))
     end
 
     # Similar to Dataset#join_table, but uses unambiguous aliases for selected
@@ -26,7 +26,7 @@ module Sequel
     #
     # Arguments:
     # dataset :: Can be a symbol (specifying a table), another dataset,
-    #            or an object that responds to +dataset+ and returns a symbol or a dataset
+    #            or an SQL::Identifier, SQL::QualifiedIdentifier, or SQL::AliasedExpression.
     # join_conditions :: Any condition(s) allowed by +join_table+.
     # block :: A block that is passed to +join_table+.
     #
@@ -36,6 +36,7 @@ module Sequel
     #                     the receiver is wrapped in a from_self before graphing, and this option
     #                     determines the alias to use.
     # :implicit_qualifier :: The qualifier of implicit conditions, see #join_table.
+    # :join_only :: Only join the tables, do not change the selected columns.
     # :join_type :: The type of join to use (passed to +join_table+).  Defaults to :left_outer.
     # :qualify:: The type of qualification to do, see #join_table.
     # :select :: An array of columns to select.  When not used, selects
@@ -44,27 +45,41 @@ module Sequel
     #            some metadata about the join that makes it important to use +graph+ instead
     #            of +join_table+.
     # :table_alias :: The alias to use for the table.  If not specified, doesn't
-    #                 alias the table.  You will get an error if the the alias (or table) name is
+    #                 alias the table.  You will get an error if the alias (or table) name is
     #                 used more than once.
     def graph(dataset, join_conditions = nil, options = OPTS, &block)
       # Allow the use of a dataset or symbol as the first argument
       # Find the table name/dataset based on the argument
       table_alias = options[:table_alias]
+      table = dataset
+      create_dataset = true
+
       case dataset
       when Symbol
-        table = dataset
-        dataset = @db[dataset]
-        table_alias ||= table
-      when ::Sequel::Dataset
+        # let alias be the same as the table name (sans any optional schema)
+        # unless alias explicitly given in the symbol using ___ notation
+        table_alias ||= split_symbol(table).compact.last
+      when Dataset
         if dataset.simple_select_all?
           table = dataset.opts[:from].first
           table_alias ||= table
         else
-          table = dataset
           table_alias ||= dataset_alias((@opts[:num_dataset_sources] || 0)+1)
         end
+        create_dataset = false
+      when SQL::Identifier
+        table_alias ||= table.value
+      when SQL::QualifiedIdentifier
+        table_alias ||= split_qualifiers(table).last
+      when SQL::AliasedExpression
+        return graph(table.expression, join_conditions, {:table_alias=>table.alias}.merge!(options), &block)
       else
         raise Error, "The dataset argument should be a symbol or dataset"
+      end
+      table_alias = table_alias.to_sym
+
+      if create_dataset
+        dataset = db.from(table)
       end
 
       # Raise Sequel::Error with explanation that the table alias has been used
@@ -76,11 +91,22 @@ module Sequel
       # Only allow table aliases that haven't been used
       raise_alias_error.call if @opts[:graph] && @opts[:graph][:table_aliases] && @opts[:graph][:table_aliases].include?(table_alias)
       
-      # Use a from_self if this is already a joined table
-      ds = (!@opts[:graph] && (@opts[:from].length > 1 || @opts[:join])) ? from_self(:alias=>options[:from_self_alias] || first_source) : self
+      table_alias_qualifier = qualifier_from_alias_symbol(table_alias, table)
+      implicit_qualifier = options[:implicit_qualifier]
+      ds = self
+
+      # Use a from_self if this is already a joined table (or from_self specifically disabled for graphs)
+      if (@opts[:graph_from_self] != false && !@opts[:graph] && joined_dataset?)
+        from_selfed = true
+        implicit_qualifier = options[:from_self_alias] || first_source
+        ds = ds.from_self(:alias=>implicit_qualifier)
+      end
       
       # Join the table early in order to avoid cloning the dataset twice
-      ds = ds.join_table(options[:join_type] || :left_outer, table, join_conditions, :table_alias=>table_alias, :implicit_qualifier=>options[:implicit_qualifier], :qualify=>options[:qualify], &block)
+      ds = ds.join_table(options[:join_type] || :left_outer, table, join_conditions, :table_alias=>table_alias_qualifier, :implicit_qualifier=>implicit_qualifier, :qualify=>options[:qualify], &block)
+
+      return ds if options[:join_only]
+
       opts = ds.opts
 
       # Whether to include the table in the result set
@@ -88,52 +114,50 @@ module Sequel
       # Whether to add the columns to the list of column aliases
       add_columns = !ds.opts.include?(:graph_aliases)
 
-      # Setup the initial graph data structure if it doesn't exist
       if graph = opts[:graph]
         opts[:graph] = graph = graph.dup
         select = opts[:select].dup
         [:column_aliases, :table_aliases, :column_alias_num].each{|k| graph[k] = graph[k].dup}
       else
-        master = alias_symbol(ds.first_source_alias)
+        # Setup the initial graph data structure if it doesn't exist
+        qualifier = ds.first_source_alias
+        master = alias_symbol(qualifier)
         raise_alias_error.call if master == table_alias
+
         # Master hash storing all .graph related information
         graph = opts[:graph] = {}
+
         # Associates column aliases back to tables and columns
         column_aliases = graph[:column_aliases] = {}
+
         # Associates table alias (the master is never aliased)
         table_aliases = graph[:table_aliases] = {master=>self}
+
         # Keep track of the alias numbers used
         ca_num = graph[:column_alias_num] = Hash.new(0)
+
         # All columns in the master table are never
         # aliased, but are not included if set_graph_aliases
         # has been used.
         if add_columns
           if (select = @opts[:select]) && !select.empty? && !(select.length == 1 && (select.first.is_a?(SQL::ColumnAll)))
-            select = select.each do |sel|
-              column = case sel
-              when Symbol
-                _, c, a = split_symbol(sel)
-                (a || c).to_sym
-              when SQL::Identifier
-                sel.value.to_sym
-              when SQL::QualifiedIdentifier
-                column = sel.column
-                column = column.value if column.is_a?(SQL::Identifier)
-                column.to_sym
-              when SQL::AliasedExpression
-                column = sel.aliaz
-                column = column.value if column.is_a?(SQL::Identifier)
-                column.to_sym
-              else
-                raise Error, "can't figure out alias to use for graphing for #{sel.inspect}"
-              end
+            select = select.map do |sel|
+              raise Error, "can't figure out alias to use for graphing for #{sel.inspect}" unless column = _hash_key_symbol(sel)
               column_aliases[column] = [master, column]
+              if from_selfed
+                # Initial dataset was wrapped in subselect, selected all
+                # columns in the subselect, qualified by the subselect alias.
+                Sequel.qualify(qualifier, Sequel.identifier(column))
+              else
+                # Initial dataset not wrapped in subslect, just make
+                # sure columns are qualified in some way.
+                qualified_expression(sel, qualifier)
+              end
             end
-            select = qualified_expression(select, master)
           else
             select = columns.map do |column|
               column_aliases[column] = [master, column]
-              SQL::QualifiedIdentifier.new(master, column)
+              SQL::QualifiedIdentifier.new(qualifier, column)
             end
           end
         end
@@ -165,9 +189,9 @@ module Sequel
               column_alias = :"#{column_alias}_#{column_alias_num}" 
               ca_num[column_alias] += 1
             end
-            [column_alias, SQL::AliasedExpression.new(SQL::QualifiedIdentifier.new(table_alias, column), column_alias)]
+            [column_alias, SQL::AliasedExpression.new(SQL::QualifiedIdentifier.new(table_alias_qualifier, column), column_alias)]
           else
-            ident = SQL::QualifiedIdentifier.new(table_alias, column)
+            ident = SQL::QualifiedIdentifier.new(table_alias_qualifier, column)
             [column, ident]
           end
           column_aliases[col_alias] = [table_alias, column]
@@ -214,6 +238,20 @@ module Sequel
     end
 
     private
+
+    # Wrap the alias symbol in an SQL::Identifier if the identifier on which is based
+    # is an SQL::Identifier.  This works around cases where the alias symbol contains
+    # double embedded underscores which would be considered an implicit qualified identifier
+    # if not wrapped in an SQL::Identifier.
+    def qualifier_from_alias_symbol(aliaz, identifier)
+      identifier = identifier.column if identifier.is_a?(SQL::QualifiedIdentifier)
+      case identifier
+      when SQL::Identifier
+        Sequel.identifier(aliaz)
+      else
+        aliaz
+      end
+    end
 
     # Transform the hash of graph aliases and return a two element array
     # where the first element is an array of identifiers suitable to pass to

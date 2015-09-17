@@ -17,8 +17,8 @@
 #
 #   Sequel.sqlite('blog.db'){|db| puts db[:users].count} 
 #
-# For a more expanded introduction, see the {README}[link:files/README_rdoc.html].
-# For a quicker introduction, see the {cheat sheet}[link:files/doc/cheat_sheet_rdoc.html].
+# For a more expanded introduction, see the {README}[rdoc-ref:README.rdoc].
+# For a quicker introduction, see the {cheat sheet}[rdoc-ref:doc/cheat_sheet.rdoc].
 module Sequel
   @convert_two_digit_years = true
   @datetime_class = Time
@@ -84,13 +84,24 @@ module Sequel
   #   DB = Sequel.connect('postgres://user:password@host:port/database_name')
   #   DB = Sequel.connect('sqlite:///blog.db', :max_connections=>10)
   #
+  # You can also pass a single options hash:
+  #
+  #   DB = Sequel.connect(:adapter=>'sqlite', :database=>'./blog.db')
+  #
   # If a block is given, it is passed the opened +Database+ object, which is
   # closed when the block exits.  For example:
   #
   #   Sequel.connect('sqlite://blog.db'){|db| puts db[:users].count}  
-  # 
-  # For details, see the {"Connecting to a Database" guide}[link:files/doc/opening_databases_rdoc.html].
-  # To set up a master/slave or sharded database connection, see the {"Master/Slave Databases and Sharding" guide}[link:files/doc/sharding_rdoc.html].
+  #
+  # If a block is not given, a reference to this database will be held in
+  # <tt>Sequel::DATABASES</tt> until it is removed manually.  This is by
+  # design, and used by <tt>Sequel::Model</tt> to pick the default
+  # database.  It is recommended to pass a block if you do not want the
+  # resulting Database object to remain in memory until the process
+  # terminates.
+  #
+  # For details, see the {"Connecting to a Database" guide}[rdoc-ref:doc/opening_databases.rdoc].
+  # To set up a master/slave or sharded database connection, see the {"Master/Slave Databases and Sharding" guide}[rdoc-ref:doc/sharding.rdoc].
   def self.connect(*args, &block)
     Database.connect(*args, &block)
   end
@@ -219,6 +230,7 @@ module Sequel
   COLUMN_REF_RE1 = /\A((?:(?!__).)+)__((?:(?!___).)+)___(.+)\z/.freeze
   COLUMN_REF_RE2 = /\A((?:(?!___).)+)___(.+)\z/.freeze
   COLUMN_REF_RE3 = /\A((?:(?!__).)+)__(.+)\z/.freeze
+  SPLIT_SYMBOL_CACHE = {}
 
   # Splits the symbol into three parts.  Each part will
   # either be a string or nil.
@@ -226,16 +238,20 @@ module Sequel
   # For columns, these parts are the table, column, and alias.
   # For tables, these parts are the schema, table, and alias.
   def self.split_symbol(sym)
-    case s = sym.to_s
-    when COLUMN_REF_RE1
-      [$1, $2, $3]
-    when COLUMN_REF_RE2
-      [nil, $1, $2]
-    when COLUMN_REF_RE3
-      [$1, $2, nil]
-    else
-      [nil, s, nil]
+    unless v = Sequel.synchronize{SPLIT_SYMBOL_CACHE[sym]}
+      v = case s = sym.to_s
+      when COLUMN_REF_RE1
+        [$1.freeze, $2.freeze, $3.freeze].freeze
+      when COLUMN_REF_RE2
+        [nil, $1.freeze, $2.freeze].freeze
+      when COLUMN_REF_RE3
+        [$1.freeze, $2.freeze, nil].freeze
+      else
+        [nil, s.freeze, nil].freeze
+      end
+      Sequel.synchronize{SPLIT_SYMBOL_CACHE[sym] = v}
     end
+    v
   end
 
   # Converts the given +string+ into a +Date+ object.
@@ -323,7 +339,7 @@ module Sequel
   def self.transaction(dbs, opts=OPTS, &block)
     unless opts[:rollback]
       rescue_rollback = true
-      opts = opts.merge(:rollback=>:reraise)
+      opts = Hash[opts].merge!(:rollback=>:reraise)
     end
     pr = dbs.reverse.inject(block){|bl, db| proc{db.transaction(opts, &bl)}}
     if rescue_rollback

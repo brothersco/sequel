@@ -40,13 +40,13 @@ module Sequel
         # Add a attribute? method for the column to a module included in the class.
         def create_boolean_reader(column)
           overridable_methods_module.module_eval do
-            define_method("#{column}?"){model.db.typecast_value(:boolean, send(column))}
+            define_method("#{column}?"){model.db.typecast_value(:boolean, get_column_value(column))}
           end
         end
 
         # Add attribute? methods for all of the boolean attributes for this model.
         def create_boolean_readers
-          im = instance_methods.collect{|x| x.to_s}
+          im = instance_methods.collect(&:to_s)
           cs = columns rescue return
           cs.each{|c| create_boolean_reader(c) if boolean_attribute?(c) && !im.include?("#{c}?")}
         end

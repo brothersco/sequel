@@ -42,7 +42,7 @@ module Sequel
         if pr = Sequel.synchronize{EXTENSIONS[ext]}
           pr.call(self)
         else
-          raise(Error, "Extension #{ext} does not have specific support handling individual datasets")
+          raise(Error, "Extension #{ext} does not have specific support handling individual datasets (try: Sequel.extension #{ext.inspect})")
         end
       end
       self
@@ -58,6 +58,7 @@ module Sequel
     # Set the method to call on identifiers going into the database for this dataset
     def identifier_input_method=(v)
       raise_if_frozen!
+      skip_symbol_cache!
       @identifier_input_method = v
     end
     
@@ -77,6 +78,7 @@ module Sequel
     # Set whether to quote identifiers for this dataset
     def quote_identifiers=(v)
       raise_if_frozen!
+      skip_symbol_cache!
       @quote_identifiers = v
     end
 

@@ -327,12 +327,12 @@ ActiveRecord 2 tries to guess whether to use preloading or JOINs for eager loadi
 
 With either way of eager loading, you must call +all+ to retrieve all records at once.  You cannot use +each+, +map+, or one of the other Enumerable methods.  Just like +each+, +all+ takes a block that iterates over the records:
 
-  Artist.eager(:albums=>[:tags, :tracks]).each{|a| ...} # No cookie
-  Artist.eager(:albums=>[:tags, :tracks]).all{|a| ...} # Cookie
+  Artist.eager(:albums=>[:tags, :tracks]).each{|a| } # No cookie
+  Artist.eager(:albums=>[:tags, :tracks]).all{|a| } # Cookie
   
 Like ActiveRecord, Sequel supports cascading of eager loading for both methods of eager loading.
 
-Unlike ActiveRecord, Sequel allows you to eager load custom associations using the <tt>:eager_loader</tt> and <tt>:eager_grapher</tt> association options.  See the {Advanced Associations guide}[link:files/doc/advanced_associations_rdoc.html] for more details.
+Unlike ActiveRecord, Sequel allows you to eager load custom associations using the <tt>:eager_loader</tt> and <tt>:eager_grapher</tt> association options.  See the {Advanced Associations guide}[rdoc-ref:doc/advanced_associations.rdoc] for more details.
 
 Table aliasing when eager loading via +eager_graph+ is different in Sequel than ActiveRecord.  Sequel will always attempt to use the association name, not the table name, for any associations.  If the association name has already been used, Sequel will append _N to it, where N starts at 0 and increases by 1.  For example, for a self referential association:
 
@@ -396,7 +396,7 @@ ActiveRecord option :: Sequel option
 <tt>:polymorphic</tt>, <tt>:as</tt>, <tt>:source_type</tt> :: The +sequel_polymorphic+ external plugin
 <tt>:include</tt> :: <tt>:eager</tt>, <tt>:eager_graph</tt>
 <tt>:readonly</tt> :: No equivalent, the Sequel <tt>:read_only</tt> option just means the modification methods are not created (it makes the association read only, not records retrieved through the association)
-<tt>:through</tt>, <tt>:source</tt> :: Use a +many_to_many+ association, or the +many_through_many+ plugin
+<tt>:through</tt>, <tt>:source</tt> :: Use a +many_to_many+ or +one_through_one+ association, or the +many_through_many+ plugin
 <tt>:touch</tt> :: The +touch+ plugin
 <tt>:autosave</tt> :: A +before_save+ or +after_save+ hook
 <tt>:finder_sql</tt> :: <tt>:dataset</tt> to set a custom dataset
@@ -495,7 +495,7 @@ Note that +test_connection+ will return true if a connection can be made, but wi
 Sequel only uses connections for the minimum amount of time necessary, checking them out to do a query, and returning them as soon as the query finishes.  If you do want direct access to the connection object:
 
   Sequel::Model.db.synchronize do |connection|
-    ...
+    # ...
   end
 
 Note that the connection is yielded to the block, and the block ensures it is returned to the pool.  Sequel doesn't have a method that returns a connection, since that would check it out with no ability to ensure it is returned to the pool.
@@ -532,7 +532,7 @@ If you really want to destroy all rows in the table,call +destroy+ on the Model'
 
 If you want to use a specific <tt>Sequel::Database</tt> object, you can use <tt>db=</tt>:
 
-  BACKUP_DB = Sequel.connect(...)
+  BACKUP_DB = Sequel.connect('postgres://...')
   Album.db = BACKUP_DB
 
 If you want a specific dataset in that database, you can use +set_dataset+ or <tt>dataset=</tt>:
@@ -581,7 +581,7 @@ Here's a mapping of ActiveRecord +find+ options to <tt>Sequel::Dataset</tt> meth
 :order :: order
 :group :: group
 :limit :: limit
-:offset :: limit # second entry in limit array
+:offset :: offset
 :joins :: join, left_join, etc. # many other join methods
 :include :: eager, eager_graph # eager does preloading, eager_graph does JOINs
 :select :: select
@@ -756,7 +756,7 @@ ActiveRecord Method :: Notes, Workarounds
 +silence+ :: No equivalent.  Because the logger is handled at the <tt>Sequel::Database</tt> level, there is no thread-safe way to turn it off for specific blocks.
 +scopes+ :: No equivalent
 +sti_name+ :: No equivalent.
-+update_counters+ :: <tt>Album.where(:id=>:id).update(:counter_name=>:counter_name + 1, :other_counter=>:other_counter - 1)</tt>
++update_counters+ :: <tt>Album.where(:id=>:id).update(:counter_name=>Sequel.+(:counter_name, 1), :other_counter=>Sequel.-(:other_counter, 1))</tt>
 +uncached+ :: No equivalent
 
 === Instance Methods with Significantly Different Behavior

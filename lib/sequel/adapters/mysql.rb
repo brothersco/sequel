@@ -62,24 +62,24 @@ module Sequel
       # Connect to the database.  In addition to the usual database options,
       # the following options have effect:
       #
-      # * :auto_is_null - Set to true to use MySQL default behavior of having
-      #   a filter for an autoincrement column equals NULL to return the last
-      #   inserted row.
-      # * :charset - Same as :encoding (:encoding takes precendence)
-      # * :compress - Set to false to not compress results from the server
-      # * :config_default_group - The default group to read from the in
-      #   the MySQL config file.
-      # * :config_local_infile - If provided, sets the Mysql::OPT_LOCAL_INFILE
-      #   option on the connection with the given value.
-      # * :connect_timeout - Set the timeout in seconds before a connection
-      #   attempt is abandoned.
-      # * :encoding - Set all the related character sets for this
-      #   connection (connection, client, database, server, and results).
-      # * :read_timeout - Set the timeout in seconds for reading back results
-      #   to a query.
-      # * :socket - Use a unix socket file instead of connecting via TCP/IP.
-      # * :timeout - Set the timeout in seconds before the server will
-      #   disconnect this connection (a.k.a @@wait_timeout).
+      # :auto_is_null :: Set to true to use MySQL default behavior of having
+      #                  a filter for an autoincrement column equals NULL to return the last
+      #                  inserted row.
+      # :charset :: Same as :encoding (:encoding takes precendence)
+      # :compress :: Set to false to not compress results from the server
+      # :config_default_group :: The default group to read from the in
+      #                          the MySQL config file.
+      # :config_local_infile :: If provided, sets the Mysql::OPT_LOCAL_INFILE
+      #                         option on the connection with the given value.
+      # :connect_timeout :: Set the timeout in seconds before a connection
+      #                     attempt is abandoned.
+      # :encoding :: Set all the related character sets for this
+      #              connection (connection, client, database, server, and results).
+      # :read_timeout :: Set the timeout in seconds for reading back results
+      #                  to a query.
+      # :socket :: Use a unix socket file instead of connecting via TCP/IP.
+      # :timeout :: Set the timeout in seconds before the server will
+      #             disconnect this connection (a.k.a @@wait_timeout).
       def connect(server)
         opts = server_opts(server)
         conn = Mysql.init
@@ -133,12 +133,12 @@ module Sequel
       # depending on the value given.
       def convert_invalid_date_time=(v)
         m0 = ::Sequel.method(:string_to_time)
-        @conversion_procs[11] = (v != false) ?  lambda{|v| convert_date_time(v, &m0)} : m0
+        @conversion_procs[11] = (v != false) ?  lambda{|val| convert_date_time(val, &m0)} : m0
         m1 = ::Sequel.method(:string_to_date) 
-        m = (v != false) ? lambda{|v| convert_date_time(v, &m1)} : m1
+        m = (v != false) ? lambda{|val| convert_date_time(val, &m1)} : m1
         [10, 14].each{|i| @conversion_procs[i] = m}
         m2 = method(:to_application_timestamp)
-        m = (v != false) ? lambda{|v| convert_date_time(v, &m2)} : m2
+        m = (v != false) ? lambda{|val| convert_date_time(val, &m2)} : m2
         [7, 12].each{|i| @conversion_procs[i] = m}
         @convert_invalid_date_time = v
       end
@@ -303,7 +303,7 @@ module Sequel
             type_proc = f.type == 1 && cast_tinyint_integer?(f) ? cps[2] : cps[f.type]
             [output_identifier(f.name), type_proc, i+=1]
           end
-          @columns = cols.map{|c| c.first}
+          @columns = cols.map(&:first)
           if opts[:split_multiple_result_sets]
             s = []
             yield_rows(r, cols){|h| s << h}
@@ -347,8 +347,10 @@ module Sequel
       end
       
       # Set the :type option to :select if it hasn't been set.
-      def execute(sql, opts=OPTS, &block)
-        super(sql, {:type=>:select}.merge(opts), &block)
+      def execute(sql, opts=OPTS)
+        opts = Hash[opts]
+        opts[:type] = :select
+        super
       end
       
       # Handle correct quoting of strings using ::MySQL.quote.

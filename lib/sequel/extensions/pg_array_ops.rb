@@ -19,8 +19,8 @@
 #
 #   ia = Sequel.expr(:int_array_column).pg_array
 #
-# If you have loaded the {core_extensions extension}[link:files/doc/core_extensions_rdoc.html]),
-# or you have loaded the {core_refinements extension}[link:files/doc/core_refinements_rdoc.html])
+# If you have loaded the {core_extensions extension}[rdoc-ref:doc/core_extensions.rdoc],
+# or you have loaded the core_refinements extension
 # and have activated refinements for the file, you can also use Symbol#pg_array:
 #
 #   ia = :int_array_column.pg_array
@@ -41,7 +41,10 @@
 #
 #   ia.any             # ANY(int_array_column)
 #   ia.all             # ALL(int_array_column)
+#   ia.cardinality     # cardinality(int_array_column)
 #   ia.dims            # array_dims(int_array_column)
+#   ia.hstore          # hstore(int_array_column)
+#   ia.hstore(:a)      # hstore(int_array_column, a)
 #   ia.length          # array_length(int_array_column, 1)
 #   ia.length(2)       # array_length(int_array_column, 2)
 #   ia.lower           # array_lower(int_array_column, 1)
@@ -50,6 +53,7 @@
 #   ia.join(':')       # array_to_string(int_array_column, ':', NULL)
 #   ia.join(':', ' ')  # array_to_string(int_array_column, ':', ' ')
 #   ia.unnest          # unnest(int_array_column)
+#   ia.unnest(:b)      # unnest(int_array_column, b)
 # 
 # See the PostgreSQL array function and operator documentation for more
 # details on what these functions and operators do.
@@ -57,6 +61,11 @@
 # If you are also using the pg_array extension, you should load it before
 # loading this extension.  Doing so will allow you to use PGArray#op to get
 # an ArrayOp, allowing you to perform array operations on array literals.
+#
+# In order for #hstore to automatically wrap the returned value correctly in
+# an HStoreOp, you need to load the pg_hstore_ops extension.
+
+#
 module Sequel
   module Postgres
     # The ArrayOp class is a simple container for a single object that
@@ -103,6 +112,13 @@ module Sequel
       #   # WHERE (1 = ANY(array))
       def any
         function(:ANY)
+      end
+
+      # Call the cardinality method:
+      #
+      #   array_op.cardinality # cardinality(array)
+      def cardinality
+        function(:cardinality)
       end
 
       # Use the contains (@>) operator:
@@ -209,8 +225,8 @@ module Sequel
       # Call the unnest method:
       #
       #   array_op.unnest # unnest(array)
-      def unnest
-        function(:unnest)
+      def unnest(*args)
+        function(:unnest, *args.map{|a| wrap_array(a)})
       end
       
       # Use the concatentation (||) operator, reversing the order:

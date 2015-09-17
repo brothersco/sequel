@@ -91,14 +91,20 @@ module Sequel
       # The conversion procs to use for this database
       attr_reader :conversion_procs
 
-      # Connect to the database.  Since SQLite is a file based database,
-      # the only options available are :database (to specify the database
-      # name), and :timeout, to specify how long to wait for the database to
-      # be available if it is locked, given in milliseconds (default is 5000).
+      # Connect to the database. Since SQLite is a file based database,
+      # available options are limited:
+      #
+      # :database :: database name (filename or ':memory:' or file: URI)
+      # :readonly :: open database in read-only mode; useful for reading
+      #              static data that you do not want to modify
+      # :timeout :: how long to wait for the database to be available if it
+      #             is locked, given in milliseconds (default is 5000)
       def connect(server)
         opts = server_opts(server)
         opts[:database] = ':memory:' if blank_object?(opts[:database])
-        db = ::SQLite3::Database.new(opts[:database])
+        sqlite3_opts = {}
+        sqlite3_opts[:readonly] = typecast_value_boolean(opts[:readonly]) if opts.has_key?(:readonly)
+        db = ::SQLite3::Database.new(opts[:database].to_s, sqlite3_opts)
         db.busy_timeout(opts.fetch(:timeout, 5000))
         
         connection_pragmas.each{|s| log_yield(s){db.execute_batch(s)}}
@@ -298,52 +304,9 @@ module Sequel
         end
       end
       
-      # SQLite prepared statement uses a new prepared statement each time
-      # it is called, but it does use the bind arguments.
-      module BindArgumentMethods
-        include ArgumentMapper
-        
-        private
-        
-        # Run execute_select on the database with the given SQL and the stored
-        # bind arguments.
-        def execute(sql, opts=OPTS, &block)
-          super(sql, {:arguments=>bind_arguments}.merge(opts), &block)
-        end
-        
-        # Same as execute, explicit due to intricacies of alias and super.
-        def execute_dui(sql, opts=OPTS, &block)
-          super(sql, {:arguments=>bind_arguments}.merge(opts), &block)
-        end
-        
-        # Same as execute, explicit due to intricacies of alias and super.
-        def execute_insert(sql, opts=OPTS, &block)
-          super(sql, {:arguments=>bind_arguments}.merge(opts), &block)
-        end
-      end
+      BindArgumentMethods = prepared_statements_module(:bind, ArgumentMapper)
+      PreparedStatementMethods = prepared_statements_module(:prepare, BindArgumentMethods)
 
-      module PreparedStatementMethods
-        include BindArgumentMethods
-          
-        private
-          
-        # Execute the stored prepared statement name and the stored bind
-        # arguments instead of the SQL given.
-        def execute(sql, opts=OPTS, &block)
-          super(prepared_statement_name, opts, &block)
-        end
-         
-        # Same as execute, explicit due to intricacies of alias and super.
-        def execute_dui(sql, opts=OPTS, &block)
-          super(prepared_statement_name, opts, &block)
-        end
-          
-        # Same as execute, explicit due to intricacies of alias and super.
-        def execute_insert(sql, opts=OPTS, &block)
-          super(prepared_statement_name, opts, &block)
-        end
-      end
-        
       # Execute the given type of statement with the hash of values.
       def call(type, bind_vars={}, *values, &block)
         ps = to_prepared_statement(type, values)
@@ -358,7 +321,7 @@ module Sequel
           cps = db.conversion_procs
           type_procs = result.types.map{|t| cps[base_type_name(t)]}
           cols = result.columns.map{|c| i+=1; [output_identifier(c), i, type_procs[i]]}
-          @columns = cols.map{|c| c.first}
+          @columns = cols.map(&:first)
           result.each do |values|
             row = {}
             cols.each do |name,id,type_proc|

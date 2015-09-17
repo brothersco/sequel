@@ -20,8 +20,8 @@
 #
 #   h = Sequel.expr(:hstore_column).hstore
 #
-# If you have loaded the {core_extensions extension}[link:files/doc/core_extensions_rdoc.html]),
-# or you have loaded the {core_refinements extension}[link:files/doc/core_refinements_rdoc.html])
+# If you have loaded the {core_extensions extension}[rdoc-ref:doc/core_extensions.rdoc],
+# or you have loaded the core_refinements extension
 # and have activated refinements for the file, you can also use Symbol#hstore:
 #
 #   h = :hstore_column.hstore
@@ -52,13 +52,29 @@
 #   h.to_matrix      # hstore_to_matrix(hstore_column)
 #   h.values         # avals(hstore_column)
 #
+# Here are a couple examples for updating an existing hstore column:
+#
+#   # Add a key, or update an existing key with a new value
+#   DB[:tab].update(:h=>Sequel.hstore_op(:h).concat('c'=>3))
+# 
+#   # Delete a key
+#   DB[:tab].update(:h=>Sequel.hstore_op(:h).delete('k1'))
+#  
 # See the PostgreSQL hstore function and operator documentation for more
 # details on what these functions and operators do.
 #
 # If you are also using the pg_hstore extension, you should load it before
 # loading this extension.  Doing so will allow you to use HStore#op to get
 # an HStoreOp, allowing you to perform hstore operations on hstore literals.
+#
+# Some of these methods will accept ruby arrays and convert them automatically to
+# PostgreSQL arrays if you have the pg_array extension loaded.  Some of these methods
+# will accept ruby hashes and convert them automatically to PostgreSQL hstores if the
+# pg_hstore extension is loaded.  Methods representing expressions that return
+# PostgreSQL arrays will have the returned expression automatically wrapped in a
+# Postgres::ArrayOp if the pg_array_ops extension is loaded.
 
+#
 module Sequel
   module Postgres
     # The HStoreOp class is a simple container for a single object that

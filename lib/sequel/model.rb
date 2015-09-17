@@ -35,7 +35,7 @@ module Sequel
   #     dataset # => DB1[:comments]
   #   end
   def self.Model(source)
-    if cache_anonymous_models && (klass = Sequel.synchronize{Model::ANONYMOUS_MODEL_CLASSES[source]})
+    if cache_anonymous_models && (klass = Model::ANONYMOUS_MODEL_CLASSES_MUTEX.synchronize{Model::ANONYMOUS_MODEL_CLASSES[source]})
       return klass
     end
     klass = if source.is_a?(Database)
@@ -45,7 +45,7 @@ module Sequel
     else
       Class.new(Model).set_dataset(source)
     end
-    Sequel.synchronize{Model::ANONYMOUS_MODEL_CLASSES[source] = klass} if cache_anonymous_models
+    Model::ANONYMOUS_MODEL_CLASSES_MUTEX.synchronize{Model::ANONYMOUS_MODEL_CLASSES[source] = klass} if cache_anonymous_models
     klass
   end
 
@@ -78,9 +78,12 @@ module Sequel
     # of classes when dealing with code reloading.
     ANONYMOUS_MODEL_CLASSES = {}
 
+    # Mutex protecting access to ANONYMOUS_MODEL_CLASSES
+    ANONYMOUS_MODEL_CLASSES_MUTEX = Mutex.new
+
     # Class methods added to model that call the method of the same name on the dataset
     DATASET_METHODS = (Dataset::ACTION_METHODS + Dataset::QUERY_METHODS +
-      [:each_server]) - [:and, :or, :[], :columns, :columns!, :delete, :update, :add_graph_aliases]
+      [:each_server]) - [:and, :or, :[], :columns, :columns!, :delete, :update, :add_graph_aliases, :first, :first!]
     
     # Boolean settings that can be modified at the global, class, or instance level.
     BOOLEAN_SETTINGS = [:typecast_empty_string_to_nil, :typecast_on_assignment, :strict_param_setting, \
@@ -104,7 +107,7 @@ module Sequel
     # Empty instance methods to create that the user can override to get hook/callback behavior.
     # Just like any other method defined by Sequel, if you override one of these, you should
     # call +super+ to get the default behavior (while empty by default, they can also be defined
-    # by plugins).  See the {"Model Hooks" guide}[link:files/doc/model_hooks_rdoc.html] for
+    # by plugins).  See the {"Model Hooks" guide}[rdoc-ref:doc/model_hooks.rdoc] for
     # more detail on hooks.
     HOOKS = BEFORE_HOOKS + AFTER_HOOKS
 
@@ -119,7 +122,7 @@ module Sequel
       :@typecast_empty_string_to_nil=>nil, :@typecast_on_assignment=>nil,
       :@raise_on_typecast_failure=>nil, :@plugins=>:dup, :@setter_methods=>nil,
       :@use_after_commit_rollback=>nil, :@fast_pk_lookup_sql=>nil,
-      :@fast_instance_delete_sql=>nil,
+      :@fast_instance_delete_sql=>nil, :@finders=>:dup, :@finder_loaders=>:dup,
       :@db=>nil, :@default_set_fields_options=>:dup}
 
     # Regular expression that determines if a method name is normal in the sense that
@@ -138,6 +141,8 @@ module Sequel
     @dataset_method_modules = []
     @default_eager_limit_strategy = true
     @default_set_fields_options = {}
+    @finders = {}
+    @finder_loaders = {}
     @overridable_methods_module = nil
     @fast_pk_lookup_sql = nil
     @fast_instance_delete_sql = nil
@@ -165,6 +170,6 @@ module Sequel
 
     # The setter methods (methods ending with =) that are never allowed
     # to be called automatically via +set+/+update+/+new+/etc..
-    RESTRICTED_SETTER_METHODS = instance_methods.map{|x| x.to_s}.grep(SETTER_METHOD_REGEXP)
+    RESTRICTED_SETTER_METHODS = instance_methods.map(&:to_s).grep(SETTER_METHOD_REGEXP)
   end
 end

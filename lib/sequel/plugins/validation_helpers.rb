@@ -19,7 +19,7 @@ module Sequel
     # Options:
     # :allow_blank :: Whether to skip the validation if the value is blank.  You should
     #                 make sure all objects respond to blank if you use this option, which you can do by:
-    #     Sequel.extension :blank
+    #                     Sequel.extension :blank
     # :allow_missing :: Whether to skip the validation if the attribute isn't a key in the
     #                   values hash.  This is different from allow_nil, because Sequel only sends the attributes
     #                   in the values when doing an insert or update.  If the attribute is not present, Sequel
@@ -30,6 +30,9 @@ module Sequel
     #                   Sequel will attempt to insert a NULL value into the database, instead of using the
     #                   database's default.
     # :allow_nil :: Whether to skip the validation if the value is nil.
+    # :from :: Set to :values to pull column values from the values hash instead of calling the related method.
+    #          Allows for setting up methods on the underlying column values, in the cases where the model
+    #          transforms the underlying value before returning it, such as when using serialization.
     # :message :: The message to use.  Can be a string which is used directly, or a
     #             proc which is called.  If the validation method takes a argument before the array of attributes,
     #             that argument is passed as an argument to the proc.
@@ -44,8 +47,7 @@ module Sequel
     #
     #   Sequel::Plugins::ValidationHelpers::DEFAULT_OPTIONS.merge!(
     #     :exact_length=>{:message=>lambda{|exact| I18n.t("errors.exact_length", :exact => exact)}},
-    #     :integer=>{:message=>lambda{I18n.t("errors.integer")}},
-    #     ...
+    #     :integer=>{:message=>lambda{I18n.t("errors.integer")}}
     #   )
     #
     # and then use something like this in your yaml translation file:
@@ -157,7 +159,7 @@ module Sequel
         def validates_schema_types(atts=keys, opts=OPTS)
           Array(atts).each do |k|
             if type = schema_type_class(k)
-              validates_type(type, k, {:allow_nil=>true}.merge(opts))
+              validates_type(type, k, {:allow_nil=>true}.merge!(opts))
             end
           end
         end
@@ -202,6 +204,8 @@ module Sequel
         # since it can deal with a grouping of multiple attributes.
         #
         # Possible Options:
+        # :dataset :: The base dataset to use for the unique query, defaults to the
+        #             model's dataset.
         # :message :: The message to use (default: 'is already taken')
         # :only_if_modified :: Only check the uniqueness if the object is new or
         #                      one of the columns has been modified.
@@ -213,7 +217,7 @@ module Sequel
         # If you want to to a case insensitive uniqueness validation on a database that
         # is case sensitive by default, you can use:
         #
-        #   :where=>(proc do |ds, obj, cols|
+        #   validates_unique :column, :where=>(proc do |ds, obj, cols|
         #     ds.where(cols.map do |c|
         #       v = obj.send(c)
         #       v = v.downcase if v
@@ -223,23 +227,28 @@ module Sequel
         def validates_unique(*atts)
           opts = default_validation_helpers_options(:unique)
           if atts.last.is_a?(Hash)
-            opts = opts.merge(atts.pop)
+            opts = Hash[opts].merge!(atts.pop)
           end
           message = validation_error_message(opts[:message])
+          from_values = opts[:from] == :values
           where = opts[:where]
           atts.each do |a|
             arr = Array(a)
             next if arr.any?{|x| errors.on(x)}
             next if opts[:only_if_modified] && !new? && !arr.any?{|x| changed_columns.include?(x)}
+            ds = opts[:dataset] || model.dataset
             ds = if where
-              where.call(model.dataset, self, arr)
+              where.call(ds, self, arr)
             else
-              vals = arr.map{|x| send(x)}
-              next if vals.any?{|v| v.nil?}
-              model.where(arr.zip(vals))
+              vals = arr.map{|x| from_values ? values[x] : get_column_value(x)}
+              next if vals.any?(&:nil?)
+              ds.where(arr.zip(vals))
             end
             ds = yield(ds) if block_given?
-            ds = ds.exclude(pk_hash) unless new?
+            unless new?
+              h = ds.joined_dataset? ? qualified_pk_hash : pk_hash
+              ds = ds.exclude(h)
+            end
             errors.add(a, message) unless ds.count == 0
           end
         end
@@ -260,9 +269,10 @@ module Sequel
         # an error message for that attributes.
         def validatable_attributes(atts, opts)
           am, an, ab, m = opts.values_at(:allow_missing, :allow_nil, :allow_blank, :message)
+          from_values = opts[:from] == :values
           Array(atts).each do |a|
             next if am && !values.has_key?(a)
-            v = send(a)
+            v = from_values ? values[a] : get_column_value(a)
             next if an && v.nil?
             next if ab && v.respond_to?(:blank?) && v.blank?
             if message = yield(a, v, m)
@@ -274,7 +284,7 @@ module Sequel
         # Merge the given options with the default options for the given type
         # and call validatable_attributes with the merged options.
         def validatable_attributes_for_type(type, atts, opts, &block)
-          validatable_attributes(atts, default_validation_helpers_options(type).merge(opts), &block)
+          validatable_attributes(atts, Hash[default_validation_helpers_options(type)].merge!(opts), &block)
         end
         
         # The validation error message to use, as a string.  If message

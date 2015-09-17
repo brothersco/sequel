@@ -1,16 +1,15 @@
 # The pg_inet extension adds support for Sequel to handle
 # PostgreSQL's inet and cidr types using ruby's IPAddr class.
 #
-# This extension integrates with Sequel's native postgres adapter, so
-# that when inet/cidr fields are retrieved, they are returned as
+# This extension integrates with Sequel's native postgres and jdbc/postgresql
+# adapters, so that when inet/cidr fields are retrieved, they are returned as
 # IPAddr instances
 #
-# After loading the extension, you should extend your dataset
-# with a module so that it correctly handles the inet/cidr type:
+# To use this extension, load it into your database:
 #
 #   DB.extension :pg_inet
 #
-# If you are not using the native postgres adapter and are using inet/cidr
+# If you are not using the native postgres or jdbc/postgresql adapters and are using inet/cidr
 # types as model column values you probably should use the
 # pg_typecast_on_load plugin if the column values are returned as a string.
 #
@@ -25,6 +24,9 @@
 # addresses, so these will still be returned as strings.  The exception
 # to this is that the pg_array extension integration will recognize
 # macaddr[] types return them as arrays of strings.
+#
+# See the {schema modification guide}[rdoc-ref:doc/schema_modification.rdoc]
+# for details on using inet/cidr columns in CREATE/ALTER TABLE statements.
 
 require 'ipaddr'
 Sequel.require 'adapters/utils/pg_types'

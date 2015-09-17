@@ -20,7 +20,7 @@ Without a filename argument, the sqlite adapter will setup a new sqlite database
   require 'logger'
   DB = Sequel.sqlite '', :loggers => [Logger.new($stdout)]
   # or
-  DB.loggers << Logger.new(...)
+  DB.loggers << Logger.new($stdout)
 
 == Using raw SQL
 
@@ -63,7 +63,7 @@ Without a filename argument, the sqlite adapter will setup a new sqlite database
   dataset.inject(0){|sum, r| sum + r[:value]}
   dataset.sum(:value) # better
 
-== Filtering (see also {Dataset Filtering}[link:files/doc/dataset_filtering_rdoc.html])
+== Filtering (see also {Dataset Filtering}[rdoc-ref:doc/dataset_filtering.rdoc])
 
 === Equality
 
@@ -100,7 +100,7 @@ Without a filename argument, the sqlite adapter will setup a new sqlite database
   DB[:items].where{(x > 5) & (y > 10)}.sql 
   # SELECT * FROM items WHERE ((x > 5) AND (y > 10))
 
-  DB[:items].where(Sequel.or(:x => 1, :y => 2)) & Sequel.~(:z => 3)).sql 
+  DB[:items].where(Sequel.or(:x => 1, :y => 2) & Sequel.~(:z => 3)).sql 
   # SELECT * FROM items WHERE (((x = 1) OR (y = 2)) AND (z != 3))
 
 === Mathematical operators
@@ -121,6 +121,7 @@ Without a filename argument, the sqlite adapter will setup a new sqlite database
 
   dataset.limit(30) # LIMIT 30
   dataset.limit(30, 10) # LIMIT 30 OFFSET 10
+  dataset.limit(30).offset(10) # LIMIT 30 OFFSET 10
 
 == Joins
 
@@ -149,7 +150,7 @@ Without a filename argument, the sqlite adapter will setup a new sqlite database
   dataset.update(:updated_at => Sequel.function(:NOW))
   dataset.update(:updated_at => Sequel.lit('NOW()'))
 
-  dataset.update(:updated_at => Sequel.lit("DateValue('1/1/2001')")
+  dataset.update(:updated_at => Sequel.lit("DateValue('1/1/2001')"))
   dataset.update(:updated_at => Sequel.function(:DateValue, '1/1/2001'))
 
 == Schema Manipulation
@@ -183,7 +184,7 @@ Without a filename argument, the sqlite adapter will setup a new sqlite database
 Database#transaction is re-entrant:
 
   DB.transaction do # BEGIN issued only here
-    DB.transaction
+    DB.transaction do
       dataset << {:first_name => 'Inigo', :last_name => 'Montoya'}
     end
   end # COMMIT issued only here
@@ -204,7 +205,7 @@ Savepoints can be used if the database supports it:
 
   DB.transaction do
     dataset << {:first_name => 'Farm', :last_name => 'Boy'} # Inserted
-    DB.transaction(:savepoint=>true) # This savepoint is rolled back
+    DB.transaction(:savepoint=>true) do # This savepoint is rolled back
       dataset << {:first_name => 'Inigo', :last_name => 'Montoya'} # Not inserted
       raise(Sequel::Rollback) if something_bad_happened
     end
@@ -215,6 +216,5 @@ Savepoints can be used if the database supports it:
 
   dataset.sql # "SELECT * FROM items"
   dataset.delete_sql # "DELETE FROM items"
-  dataset.where(:name => 'sequel').exists # "EXISTS ( SELECT * FROM items WHERE name = 'sequel' )"
-  dataset.columns #=> array of columns in the result set, does a SELECT
-  DB.schema(:items) => [[:id, {:type=>:integer, ...}], [:name, {:type=>:string, ...}], ...]
+  dataset.columns # => array of columns in the result set, does a SELECT
+  DB.schema(:items) # => [[:id, {:type=>:integer, ...}], [:name, {:type=>:string, ...}], ...]

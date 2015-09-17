@@ -44,6 +44,7 @@ module Sequel
     #
     # Options:
     # :ignore_errors :: Ignore any DatabaseErrors that are raised
+    # :name :: Name to use for index instead of default
     #
     # See <tt>alter_table</tt>.
     def add_index(table, columns, options=OPTS)
@@ -71,7 +72,7 @@ module Sequel
     # definitions using <tt>create_table</tt>, and +add_index+ accepts all the options
     # available for index definition.
     #
-    # See <tt>Schema::AlterTableGenerator</tt> and the {"Migrations and Schema Modification" guide}[link:files/doc/migration_rdoc.html].
+    # See <tt>Schema::AlterTableGenerator</tt> and the {"Migrations and Schema Modification" guide}[rdoc-ref:doc/migration.rdoc].
     def alter_table(name, generator=nil, &block)
       generator ||= alter_table_generator(&block)
       remove_cached_schema(name)
@@ -118,7 +119,7 @@ module Sequel
     # :no_index :: Set to true not to create the second index.
     # :no_primary_key :: Set to true to not create the primary key.
     def create_join_table(hash, options=OPTS)
-      keys = hash.keys.sort_by{|k| k.to_s}
+      keys = hash.keys.sort_by(&:to_s)
       create_table(join_table_name(hash, options), options) do
         keys.each do |key|
           v = hash[key]
@@ -130,6 +131,21 @@ module Sequel
         end
         primary_key(keys) unless options[:no_primary_key]
         index(keys.reverse, options[:index_options] || {}) unless options[:no_index]
+      end
+    end
+
+    # Forcibly create a join table, attempting to drop it if it already exists, then creating it.
+    def create_join_table!(hash, options=OPTS)
+      drop_table?(join_table_name(hash, options))
+      create_join_table(hash, options)
+    end
+    
+    # Creates the join table unless it already exists.
+    def create_join_table?(hash, options=OPTS)
+      if supports_create_table_if_not_exists? && options[:no_index]
+        create_join_table(hash, options.merge(:if_not_exists=>true))
+      elsif !table_exists?(join_table_name(hash, options))
+        create_join_table(hash, options)
       end
     end
 
@@ -155,11 +171,19 @@ module Sequel
     # :engine :: The table engine to use for the table.
     #
     # PostgreSQL specific options:
-    # :unlogged :: Create the table as an unlogged table.
-    # :inherits :: Inherit from a different tables.  An array can be
+    # :on_commit :: Either :preserve_rows (default), :drop or :delete_rows. Should
+    #               only be specified when creating a temporary table.
+    # :foreign :: Create a foreign table.  The value should be the name of the
+    #             foreign server that was specified in CREATE SERVER.
+    # :inherits :: Inherit from a different table.  An array can be
     #              specified to inherit from multiple tables.
+    # :unlogged :: Create the table as an unlogged table.
+    # :options :: The OPTIONS clause to use for foreign tables.  Should be a hash
+    #             where keys are option names and values are option values.  Note
+    #             that option names are unquoted, so you should not use untrusted
+    #             keys.
     #
-    # See <tt>Schema::Generator</tt> and the {"Schema Modification" guide}[link:files/doc/schema_modification_rdoc.html].
+    # See <tt>Schema::Generator</tt> and the {"Schema Modification" guide}[rdoc-ref:doc/schema_modification.rdoc].
     def create_table(name, options=OPTS, &block)
       remove_cached_schema(name)
       options = {:generator=>options} if options.is_a?(Schema::CreateTableGenerator)
@@ -191,10 +215,12 @@ module Sequel
     #   # SELECT NULL FROM a LIMIT 1 -- check existence
     #   # CREATE TABLE a (a integer) -- if it doesn't already exist
     def create_table?(name, options=OPTS, &block)
-      if supports_create_table_if_not_exists?
-        create_table(name, options.merge(:if_not_exists=>true), &block)
+      options = options.dup
+      generator = options[:generator] ||= create_table_generator(&block)
+      if generator.indexes.empty? && supports_create_table_if_not_exists?
+        create_table(name, options.merge!(:if_not_exists=>true))
       elsif !table_exists?(name)
-        create_table(name, options, &block)
+        create_table(name, options)
       end
     end
 
@@ -224,16 +250,30 @@ module Sequel
     # Creates a view based on a dataset or an SQL string:
     #
     #   DB.create_view(:cheap_items, "SELECT * FROM items WHERE price < 100")
-    #   DB.create_view(:ruby_items, DB[:items].filter(:category => 'ruby'))
+    #   # CREATE VIEW cheap_items AS
+    #   # SELECT * FROM items WHERE price < 100
+    #
+    #   DB.create_view(:ruby_items, DB[:items].where(:category => 'ruby'))
+    #   # CREATE VIEW ruby_items AS
+    #   # SELECT * FROM items WHERE (category = 'ruby')
+    #
+    #   DB.create_view(:checked_items, DB[:items].where(:foo), :check=>true)
+    #   # CREATE VIEW checked_items AS
+    #   # SELECT * FROM items WHERE foo
+    #   # WITH CHECK OPTION
     #
     # Options:
     # :columns :: The column names to use for the view.  If not given,
     #             automatically determined based on the input dataset.
+    # :check :: Adds a WITH CHECK OPTION clause, so that attempting to modify 
+    #           rows in the underlying table that would not be returned by the
+    #           view is not allowed.  This can be set to :local to use WITH
+    #           LOCAL CHECK OPTION.
     #
     # PostgreSQL/SQLite specific option:
     # :temp :: Create a temporary view, automatically dropped on disconnect.
     #
-    # PostgreSQL specific option:
+    # PostgreSQL specific options:
     # :materialized :: Creates a materialized view, similar to a regular view,
     #                  but backed by a physical table.
     # :recursive :: Creates a recursive view.  As columns must be specified for
@@ -315,12 +355,13 @@ module Sequel
     #   DB.drop_view(:cheap_items)
     #   DB.drop_view(:cheap_items, :pricey_items)
     #   DB.drop_view(:cheap_items, :pricey_items, :cascade=>true)
+    #   DB.drop_view(:cheap_items, :pricey_items, :if_exists=>true)
     #
     # Options:
     # :cascade :: Also drop objects depending on this view.
+    # :if_exists :: Do not raise an error if the view does not exist.
     #
     # PostgreSQL specific options:
-    # :if_exists :: Do not raise an error if the view does not exist.
     # :materialized :: Drop a materialized view.
     def drop_view(*names)
       options = names.last.is_a?(Hash) ? names.pop : {}
@@ -389,30 +430,48 @@ module Sequel
     
     # SQL fragment for given alter table operation.
     def alter_table_op_sql(table, op)
-      quoted_name = quote_identifier(op[:name]) if op[:name]
-      case op[:op]
-      when :add_column
-        "ADD COLUMN #{column_definition_sql(op)}"
-      when :drop_column
-        "DROP COLUMN #{quoted_name}#{' CASCADE' if op[:cascade]}"
-      when :rename_column
-        "RENAME COLUMN #{quoted_name} TO #{quote_identifier(op[:new_name])}"
-      when :set_column_type
-        "ALTER COLUMN #{quoted_name} TYPE #{type_literal(op)}"
-      when :set_column_default
-        "ALTER COLUMN #{quoted_name} SET DEFAULT #{literal(op[:default])}"
-      when :set_column_null
-        "ALTER COLUMN #{quoted_name} #{op[:null] ? 'DROP' : 'SET'} NOT NULL"
-      when :add_constraint
-        "ADD #{constraint_definition_sql(op)}"
-      when :drop_constraint
-        if op[:type] == :foreign_key
-          quoted_name ||= quote_identifier(foreign_key_name(table, op[:columns]))
-        end
-        "DROP CONSTRAINT #{quoted_name}#{' CASCADE' if op[:cascade]}"
+      meth = "alter_table_#{op[:op]}_sql"
+      if respond_to?(meth, true)
+        send(meth, table, op)
       else
         raise Error, "Unsupported ALTER TABLE operation: #{op[:op]}"
       end
+    end
+
+    def alter_table_add_column_sql(table, op)
+      "ADD COLUMN #{column_definition_sql(op)}"
+    end
+
+    def alter_table_drop_column_sql(table, op)
+      "DROP COLUMN #{quote_identifier(op[:name])}#{' CASCADE' if op[:cascade]}"
+    end
+
+    def alter_table_rename_column_sql(table, op)
+      "RENAME COLUMN #{quote_identifier(op[:name])} TO #{quote_identifier(op[:new_name])}"
+    end
+
+    def alter_table_set_column_type_sql(table, op)
+      "ALTER COLUMN #{quote_identifier(op[:name])} TYPE #{type_literal(op)}"
+    end
+
+    def alter_table_set_column_default_sql(table, op)
+      "ALTER COLUMN #{quote_identifier(op[:name])} SET DEFAULT #{literal(op[:default])}"
+    end
+
+    def alter_table_set_column_null_sql(table, op)
+      "ALTER COLUMN #{quote_identifier(op[:name])} #{op[:null] ? 'DROP' : 'SET'} NOT NULL"
+    end
+
+    def alter_table_add_constraint_sql(table, op)
+      "ADD #{constraint_definition_sql(op)}"
+    end
+
+    def alter_table_drop_constraint_sql(table, op)
+      quoted_name = quote_identifier(op[:name]) if op[:name]
+      if op[:type] == :foreign_key
+        quoted_name ||= quote_identifier(foreign_key_name(table, op[:columns]))
+      end
+      "DROP CONSTRAINT #{quoted_name}#{' CASCADE' if op[:cascade]}"
     end
 
     # The SQL to execute to modify the DDL for the given table name.  op
@@ -483,7 +542,9 @@ module Sequel
 
     # Add collate SQL fragment to column creation SQL.
     def column_definition_collate_sql(sql, column)
-      sql << " COLLATE #{column[:collate]}" if column[:collate]
+      if collate = column[:collate]
+        sql << " COLLATE #{collate}"
+      end
     end
 
     # Add default SQL fragment to column creation SQL.
@@ -665,7 +726,11 @@ module Sequel
     # DDL statement for creating a view.
     def create_view_sql(name, source, options)
       source = source.sql if source.is_a?(Dataset)
-      "#{create_view_prefix_sql(name, options)} AS #{source}"
+      sql = "#{create_view_prefix_sql(name, options)} AS #{source}"
+      if check = options[:check]
+        sql << " WITH#{' LOCAL' if check == :local} CHECK OPTION"
+      end
+      sql
     end
 
     # Append the column list to the SQL, if a column list is given.
@@ -704,7 +769,7 @@ module Sequel
     
     # SQL DDL statement to drop a view with the given name.
     def drop_view_sql(name, options)
-      "DROP VIEW #{quote_schema_table(name)}#{' CASCADE' if options[:cascade]}"
+      "DROP VIEW#{' IF EXISTS' if options[:if_exists]} #{quote_schema_table(name)}#{' CASCADE' if options[:cascade]}"
     end
 
     # Proxy the filter_expr call to the dataset, used for creating constraints.
@@ -736,7 +801,7 @@ module Sequel
         options[:name]
       else
         table_names = entries.map{|e| join_table_name_extract(e)}
-        table_names.map{|t| t.to_s}.sort.join('_')
+        table_names.map(&:to_s).sort.join('_')
       end
     end
 
@@ -756,13 +821,14 @@ module Sequel
     # SQL DDL ON DELETE fragment to use, based on the given action.
     # The following actions are recognized:
     # 
-    # * :cascade - Delete rows referencing this row.
-    # * :no_action (default) - Raise an error if other rows reference this
-    #   row, allow deferring of the integrity check.
-    # * :restrict - Raise an error if other rows reference this row,
-    #   but do not allow deferring the integrity check.
-    # * :set_default - Set columns referencing this row to their default value.
-    # * :set_null - Set columns referencing this row to NULL.
+    # :cascade :: Delete rows referencing this row.
+    # :no_action :: Raise an error if other rows reference this
+    #               row, allow deferring of the integrity check.
+    #               This is the default.
+    # :restrict :: Raise an error if other rows reference this row,
+    #              but do not allow deferring the integrity check.
+    # :set_default :: Set columns referencing this row to their default value.
+    # :set_null :: Set columns referencing this row to NULL.
     #
     # Any other object given is just converted to a string, with "_" converted to " " and upcased.
     def on_delete_clause(action)
@@ -791,7 +857,7 @@ module Sequel
 
     # Return true if the given column schema represents an autoincrementing primary key.
     def schema_autoincrementing_primary_key?(schema)
-      !!(schema[:primary_key] && schema[:db_type] =~ /int/io)
+      !!(schema[:primary_key] && schema[:auto_increment])
     end
 
     # The dataset to use for proxying certain schema methods.

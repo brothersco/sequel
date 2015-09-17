@@ -6,6 +6,7 @@
 #
 #   Sequel.extension :migration
 
+#
 module Sequel
   # Sequel's older migration class, available for backward compatibility.
   # Uses subclasses with up and down instance methods for each migration:
@@ -202,12 +203,12 @@ module Sequel
       @actions << [:drop_join_table, *args]
     end
 
-    def create_table(*args)
-      @actions << [:drop_table, args.first]
+    def create_table(name, opts=OPTS)
+      @actions << [:drop_table, name, opts]
     end
 
-    def create_view(*args)
-      @actions << [:drop_view, args.first]
+    def create_view(name, _, opts=OPTS)
+      @actions << [:drop_view, name, opts]
     end
 
     def rename_column(table, name, new_name)
@@ -373,7 +374,7 @@ module Sequel
       migrator_class(directory).new(db, directory, opts).is_current?
     end
 
-    # Migrates the supplied database using the migration files in the the specified directory. Options:
+    # Migrates the supplied database using the migration files in the specified directory. Options:
     # :allow_missing_migration_files :: Don't raise an error if there are missing migration files.
     # :column :: The column in the :table argument storing the migration version (default: :version).
     # :current :: The current version of the database.  If not given, it is retrieved from the database
@@ -522,13 +523,12 @@ module Sequel
     def run
       migrations.zip(version_numbers).each do |m, v|
         t = Time.now
-        lv = up? ? v : v + 1
-        db.log_info("Begin applying migration version #{lv}, direction: #{direction}")
+        db.log_info("Begin applying migration version #{v}, direction: #{direction}")
         checked_transaction(m) do
           m.apply(db, direction)
-          set_migration_version(v)
+          set_migration_version(up? ? v : v-1)
         end
-        db.log_info("Finished applying migration version #{lv}, direction: #{direction}, took #{sprintf('%0.6f', Time.now - t)} seconds")
+        db.log_info("Finished applying migration version #{v}, direction: #{direction}, took #{sprintf('%0.6f', Time.now - t)} seconds")
       end
       
       target
@@ -564,11 +564,10 @@ module Sequel
       remove_migration_classes
 
       # load migration files
-      files[up? ? (current + 1)..target : (target + 1)..current].compact.each{|f| load(f)}
+      version_numbers.each{|n| load(files[n])}
       
       # get migration classes
-      classes = Migration.descendants
-      up? ? classes : classes.reverse
+      Migration.descendants
     end
     
     # Returns the latest version available in the specified directory.
@@ -605,7 +604,13 @@ module Sequel
     # so that each number in the array is the migration version
     # that will be in affect after the migration is run.
     def version_numbers
-      up? ? ((current+1)..target).to_a : (target..(current - 1)).to_a.reverse
+      versions = files.
+        compact.
+        map{|f| migration_version_from_file(File.basename(f))}.
+        select{|v| up? ? (v > current && v <= target) : (v <= current && v > target)}.
+        sort
+      versions.reverse! unless up?
+      versions
     end
   end
 

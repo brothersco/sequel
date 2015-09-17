@@ -50,8 +50,8 @@ module Sequel
 
       # Commit an existing prepared transaction with the given transaction
       # identifier string.
-      def commit_prepared_transaction(transaction_id)
-        run("XA COMMIT #{literal(transaction_id)}")
+      def commit_prepared_transaction(transaction_id, opts=OPTS)
+        run("XA COMMIT #{literal(transaction_id)}", opts)
       end
 
       # MySQL uses the :mysql database type
@@ -112,8 +112,8 @@ module Sequel
 
       # Rollback an existing prepared transaction with the given transaction
       # identifier string.
-      def rollback_prepared_transaction(transaction_id)
-        run("XA ROLLBACK #{literal(transaction_id)}")
+      def rollback_prepared_transaction(transaction_id, opts=OPTS)
+        run("XA ROLLBACK #{literal(transaction_id)}", opts)
       end
 
       # Get version of MySQL server, used for determined capabilities.
@@ -129,12 +129,12 @@ module Sequel
         true
       end
       
-      # MySQL supports prepared transactions (two-phase commit) using XA
+      # MySQL 5+ supports prepared transactions (two-phase commit) using XA
       def supports_prepared_transactions?
         server_version >= 50000
       end
 
-      # MySQL supports savepoints
+      # MySQL 5+ supports savepoints
       def supports_savepoints?
         server_version >= 50000
       end
@@ -145,6 +145,14 @@ module Sequel
         super && (server_version <= 50512 || server_version >= 50523)
       end
 
+      # Support fractional timestamps on MySQL 5.6.5+ if the :fractional_seconds
+      # Database option is used.  Technically, MySQL 5.6.4+ supports them, but
+      # automatic initialization of datetime values wasn't supported to 5.6.5+,
+      # and this is related to that.
+      def supports_timestamp_usecs?
+        @supports_timestamp_usecs ||= server_version >= 50605 && typecast_value_boolean(opts[:fractional_seconds])
+      end
+
       # MySQL supports transaction isolation levels
       def supports_transaction_isolation_levels?
         true
@@ -153,7 +161,7 @@ module Sequel
       # Return an array of symbols specifying table names in the current database.
       #
       # Options:
-      # * :server - Set the server to use
+      # :server :: Set the server to use
       def tables(opts=OPTS)
         full_tables('BASE TABLE', opts)
       end
@@ -170,58 +178,68 @@ module Sequel
       # Return an array of symbols specifying view names in the current database.
       #
       # Options:
-      # * :server - Set the server to use
+      # :server :: Set the server to use
       def views(opts=OPTS)
         full_tables('VIEW', opts)
       end
       
       private
       
-      # Use MySQL specific syntax for some alter table operations.
-      def alter_table_op_sql(table, op)
-        case op[:op]
-        when :add_column
-          if related = op.delete(:table)
-            sql = super
-            op[:table] = related
-            op[:key] ||= primary_key_from_schema(related)
-            sql << ", ADD FOREIGN KEY (#{quote_identifier(op[:name])})#{column_references_sql(op)}"
-          else
-            super
+      def alter_table_add_column_sql(table, op)
+        if related = op.delete(:table)
+          sql = super
+          op[:table] = related
+          op[:key] ||= primary_key_from_schema(related)
+          sql << ", ADD "
+          if constraint_name = op.delete(:foreign_key_constraint_name)
+            sql << "CONSTRAINT #{quote_identifier(constraint_name)} "
           end
-        when :rename_column, :set_column_type, :set_column_null, :set_column_default
-          o = op[:op]
-          opts = schema(table).find{|x| x.first == op[:name]}
-          opts = opts ? opts.last.dup : {}
-          opts[:name] = o == :rename_column ? op[:new_name] : op[:name]
-          opts[:type] = o == :set_column_type ? op[:type] : opts[:db_type]
-          opts[:null] = o == :set_column_null ? op[:null] : opts[:allow_null]
-          opts[:default] = o == :set_column_default ? op[:default] : opts[:ruby_default]
-          opts.delete(:default) if opts[:default] == nil
-          opts.delete(:primary_key)
-          unless op[:type] || opts[:type]
-            raise Error, "cannot determine database type to use for CHANGE COLUMN operation"
-          end
-          opts = op.merge(opts)
-          opts.delete(:auto_increment) if op[:auto_increment] == false
-          "CHANGE COLUMN #{quote_identifier(op[:name])} #{column_definition_sql(opts)}"
-        when :drop_constraint
-          case op[:type]
-          when :primary_key
-            "DROP PRIMARY KEY"
-          when :foreign_key
-            name = op[:name] || foreign_key_name(table, op[:columns])
-            "DROP FOREIGN KEY #{quote_identifier(name)}"
-          when :unique
-            "DROP INDEX #{quote_identifier(op[:name])}"
-          end
-        when :add_constraint
-          if op[:type] == :foreign_key
-            op[:key] ||= primary_key_from_schema(op[:table])
-          end
-          super
+          sql << "FOREIGN KEY (#{quote_identifier(op[:name])})#{column_references_sql(op)}"
         else
           super
+        end
+      end
+
+      def alter_table_change_column_sql(table, op)
+        o = op[:op]
+        opts = schema(table).find{|x| x.first == op[:name]}
+        opts = opts ? opts.last.dup : {}
+        opts[:name] = o == :rename_column ? op[:new_name] : op[:name]
+        opts[:type] = o == :set_column_type ? op[:type] : opts[:db_type]
+        opts[:null] = o == :set_column_null ? op[:null] : opts[:allow_null]
+        opts[:default] = o == :set_column_default ? op[:default] : opts[:ruby_default]
+        opts.delete(:default) if opts[:default] == nil
+        opts.delete(:primary_key)
+        unless op[:type] || opts[:type]
+          raise Error, "cannot determine database type to use for CHANGE COLUMN operation"
+        end
+        opts = op.merge(opts)
+        if op.has_key?(:auto_increment)
+          opts[:auto_increment] = op[:auto_increment]
+        end
+        "CHANGE COLUMN #{quote_identifier(op[:name])} #{column_definition_sql(opts)}"
+      end
+      alias alter_table_rename_column_sql alter_table_change_column_sql
+      alias alter_table_set_column_type_sql alter_table_change_column_sql
+      alias alter_table_set_column_null_sql alter_table_change_column_sql
+      alias alter_table_set_column_default_sql alter_table_change_column_sql
+
+      def alter_table_add_constraint_sql(table, op)
+        if op[:type] == :foreign_key
+          op[:key] ||= primary_key_from_schema(op[:table])
+        end
+        super
+      end
+
+      def alter_table_drop_constraint_sql(table, op)
+        case op[:type]
+        when :primary_key
+          "DROP PRIMARY KEY"
+        when :foreign_key
+          name = op[:name] || foreign_key_name(table, op[:columns])
+          "DROP FOREIGN KEY #{quote_identifier(name)}"
+        when :unique
+          "DROP INDEX #{quote_identifier(op[:name])}"
         end
       end
 
@@ -262,9 +280,11 @@ module Sequel
       def mysql_connection_setting_sqls
         sqls = []
         
-        # Increase timeout so mysql server doesn't disconnect us
-        # Value used by default is maximum allowed value on Windows.
-        sqls << "SET @@wait_timeout = #{opts[:timeout] || 2147483}"
+        if wait_timeout = opts.fetch(:timeout, 2147483)
+          # Increase timeout so mysql server doesn't disconnect us
+          # Value used by default is maximum allowed value on Windows.
+          sqls << "SET @@wait_timeout = #{wait_timeout}"
+        end
 
         # By default, MySQL 'where id is null' selects the last inserted id
         sqls <<  "SET SQL_AUTO_IS_NULL=0" unless opts[:auto_is_null]
@@ -292,9 +312,8 @@ module Sequel
       # Use XA START to start a new prepared transaction if the :prepare
       # option is given.
       def begin_transaction(conn, opts=OPTS)
-        if (s = opts[:prepare]) && (th = _trans(conn))[:savepoint_level] == 0
+        if (s = opts[:prepare]) && savepoint_level(conn) == 1
           log_connection_execute(conn, "XA START #{literal(s)}")
-          th[:savepoint_level] += 1
         else
           super
         end
@@ -315,7 +334,7 @@ module Sequel
       # Prepare the XA transaction for a two-phase commit if the
       # :prepare option is given.
       def commit_transaction(conn, opts=OPTS)
-        if (s = opts[:prepare]) && _trans(conn)[:savepoint_level] <= 1
+        if (s = opts[:prepare]) && savepoint_level(conn) <= 1
           log_connection_execute(conn, "XA END #{literal(s)}")
           log_connection_execute(conn, "XA PREPARE #{literal(s)}")
         else
@@ -352,17 +371,15 @@ module Sequel
         end
 
         # Split column constraints into table constraints in some cases:
-        # * foreign key - Always
-        # * unique, primary_key - Only if constraint has a name
+        # foreign key - Always
+        # unique, primary_key - Only if constraint has a name
         generator.columns.each do |c|
           if t = c.delete(:table)
             same_table = t == name
-            k = c[:key]
+            key = c[:key] || key_proc.call(t)
 
-            key ||= key_proc.call(t)
-
-            if same_table && !k.nil?
-              generator.constraints.unshift(:type=>:unique, :columns=>Array(k))
+            if same_table && !key.nil?
+              generator.constraints.unshift(:type=>:unique, :columns=>Array(key))
             end
 
             generator.foreign_key([c[:name]], t, c.merge(:name=>c[:foreign_key_constraint_name], :type=>:foreign_key, :key=>key))
@@ -421,7 +438,7 @@ module Sequel
 
       # Rollback the currently open XA transaction
       def rollback_transaction(conn, opts=OPTS)
-        if (s = opts[:prepare]) && _trans(conn)[:savepoint_level] <= 1
+        if (s = opts[:prepare]) && savepoint_level(conn) <= 1
           log_connection_execute(conn, "XA END #{literal(s)}")
           log_connection_execute(conn, "XA PREPARE #{literal(s)}")
           log_connection_execute(conn, "XA ROLLBACK #{literal(s)}")
@@ -451,15 +468,22 @@ module Sequel
         table = SQL::Identifier.new(im.call(table_name))
         table = SQL::QualifiedIdentifier.new(im.call(opts[:schema]), table) if opts[:schema]
         metadata_dataset.with_sql("DESCRIBE ?", table).map do |row|
-          row[:auto_increment] = true if row.delete(:Extra).to_s =~ /auto_increment/io
+          extra = row.delete(:Extra)
+          if row[:primary_key] = row.delete(:Key) == 'PRI'
+            row[:auto_increment] = !!(extra.to_s =~ /auto_increment/io)
+          end
           row[:allow_null] = row.delete(:Null) == 'YES'
           row[:default] = row.delete(:Default)
-          row[:primary_key] = row.delete(:Key) == 'PRI'
-          row[:default] = nil if blank_object?(row[:default])
           row[:db_type] = row.delete(:Type)
           row[:type] = schema_column_type(row[:db_type])
           [m.call(row.delete(:Field)), row]
         end
+      end
+
+      # Split DROP INDEX ops on MySQL 5.6+, as dropping them in the same
+      # statement as dropping a related foreign key causes an error.
+      def split_alter_table_op?(op)
+        server_version >= 50600 && (op[:op] == :drop_index || (op[:op] == :drop_constraint && op[:type] == :unique))
       end
 
       # MySQL can combine multiple alter table ops into a single query.
@@ -496,7 +520,9 @@ module Sequel
       # MySQL has both datetime and timestamp classes, most people are going
       # to want datetime
       def type_literal_generic_datetime(column)
-        if column[:default] == Sequel::CURRENT_TIMESTAMP
+        if supports_timestamp_usecs?
+          :'datetime(6)'
+        elsif column[:default] == Sequel::CURRENT_TIMESTAMP
           :timestamp
         else
           :datetime
@@ -504,14 +530,27 @@ module Sequel
       end
 
       # MySQL has both datetime and timestamp classes, most people are going
-      # to want datetime
+      # to want datetime.
       def type_literal_generic_time(column)
-        column[:only_time] ? :time : type_literal_generic_datetime(column)
+        if column[:only_time]
+          if supports_timestamp_usecs?
+            :'time(6)'
+          else
+            :time
+          end
+        else
+          type_literal_generic_datetime(column)
+        end
       end
 
       # MySQL doesn't have a true boolean class, so it uses tinyint(1)
       def type_literal_generic_trueclass(column)
         :'tinyint(1)'
+      end
+
+      # MySQL 5.0.2+ supports views with check option.
+      def view_with_check_option_support
+        :local if server_version >= 50002
       end
     end
   
@@ -522,10 +561,6 @@ module Sequel
       COMMA_SEPARATOR = ', '.freeze
       FOR_SHARE = ' LOCK IN SHARE MODE'.freeze
       SQL_CALC_FOUND_ROWS = ' SQL_CALC_FOUND_ROWS'.freeze
-      DELETE_CLAUSE_METHODS = Dataset.clause_methods(:delete, %w'delete from where order limit')
-      INSERT_CLAUSE_METHODS = Dataset.clause_methods(:insert, %w'insert ignore into columns values on_duplicate_key_update')
-      SELECT_CLAUSE_METHODS = Dataset.clause_methods(:select, %w'select distinct calc_found_rows columns from join where group having compounds order limit lock')
-      UPDATE_CLAUSE_METHODS = Dataset.clause_methods(:update, %w'update ignore table set where order limit')
       APOS = Dataset::APOS
       APOS_RE = Dataset::APOS_RE
       DOUBLE_APOS = Dataset::DOUBLE_APOS
@@ -566,6 +601,15 @@ module Sequel
       BLOB_START = "0x".freeze
       EMPTY_BLOB = "''".freeze
       HSTAR = "H*".freeze
+      CURRENT_TIMESTAMP_56 = 'CURRENT_TIMESTAMP(6)'.freeze
+
+      # Comes directly from MySQL's documentation, used for queries with limits without offsets
+      ONLY_OFFSET = ",18446744073709551615".freeze
+
+      Dataset.def_sql_method(self, :delete, %w'delete from where order limit')
+      Dataset.def_sql_method(self, :insert, %w'insert ignore into columns values on_duplicate_key_update')
+      Dataset.def_sql_method(self, :select, %w'select distinct calc_found_rows columns from join where group having compounds order limit lock')
+      Dataset.def_sql_method(self, :update, %w'update ignore table set where order limit')
 
       include Sequel::Dataset::Replace
 
@@ -610,6 +654,18 @@ module Sequel
         end
       end
       
+      # MySQL's CURRENT_TIMESTAMP does not use fractional seconds,
+      # even if the database itself supports fractional seconds. If
+      # MySQL 5.6.4+ is being used, use a value that will return
+      # fractional seconds.
+      def constant_sql_append(sql, constant)
+        if constant == :CURRENT_TIMESTAMP && supports_timestamp_usecs?
+          sql << CURRENT_TIMESTAMP_56
+        else
+          super
+        end
+      end
+
       # Use GROUP BY instead of DISTINCT ON if arguments are provided.
       def distinct(*args)
         args.empty? ? super : group(*args)
@@ -686,7 +742,9 @@ module Sequel
       # Sets up the insert methods to use ON DUPLICATE KEY UPDATE
       # If you pass no arguments, ALL fields will be
       # updated with the new values.  If you pass the fields you
-      # want then ONLY those field will be updated.
+      # want then ONLY those field will be updated. If you pass a
+      # hash you can customize the values (for example, to increment
+      # a numeric field).
       #
       # Useful if you have a unique key and want to update
       # inserting rows that violate the unique key restriction.
@@ -702,20 +760,26 @@ module Sequel
       #   )
       #   # INSERT INTO tablename (name, value) VALUES (a, 1), (b, 2)
       #   # ON DUPLICATE KEY UPDATE value=VALUES(value)
+      #
+      #   dataset.on_duplicate_key_update(
+      #     :value => Sequel.lit('value + VALUES(value)')
+      #   ).multi_insert(
+      #     [{:name => 'a', :value => 1}, {:name => 'b', :value => 2}]
+      #   )
+      #   # INSERT INTO tablename (name, value) VALUES (a, 1), (b, 2)
+      #   # ON DUPLICATE KEY UPDATE value=value + VALUES(value)
       def on_duplicate_key_update(*args)
         clone(:on_duplicate_key_update => args)
       end
 
-      # MySQL specific syntax for inserting multiple values at once.
-      def multi_insert_sql(columns, values)
-        sql = LiteralString.new('VALUES ')
-        expression_list_append(sql, values.map{|r| Array(r)})
-        [insert_sql(columns, sql)]
-      end
-      
       # MySQL uses the nonstandard ` (backtick) for quoting identifiers.
       def quoted_identifier_append(sql, c)
         sql << BACKTICK << c.to_s.gsub(BACKTICK_RE, DOUBLE_BACKTICK) << BACKTICK
+      end
+
+      # MySQL does not support derived column lists
+      def supports_derived_column_lists?
+        false
       end
 
       # MySQL can emulate DISTINCT ON with its non-standard GROUP BY implementation,
@@ -734,6 +798,11 @@ module Sequel
         false
       end
       
+      # MySQL does not support limits in correlated subqueries (or any subqueries that use IN).
+      def supports_limits_in_correlated_subqueries?
+        false
+      end
+    
       # MySQL supports modifying joined datasets
       def supports_modifying_joins?
         true
@@ -754,7 +823,7 @@ module Sequel
       # ignores them.  Also, using them seems to cause problems on 1.9.  Since
       # they are ignored anyway, not using them is probably best.
       def supports_timestamp_usecs?
-        false
+        db.supports_timestamp_usecs?
       end
       
       # Sets up the update methods to use UPDATE IGNORE.
@@ -769,11 +838,6 @@ module Sequel
       
       private
 
-      # MySQL supports the ORDER BY and LIMIT clauses for DELETE statements
-      def delete_clause_methods
-        DELETE_CLAUSE_METHODS
-      end
-      
       # Consider the first table in the joined dataset is the table to delete
       # from, but include the others for the purposes of selecting rows.
       def delete_from_sql(sql)
@@ -787,12 +851,6 @@ module Sequel
           super
         end
       end
-
-      # MySQL supports the IGNORE and ON DUPLICATE KEY UPDATE clauses for INSERT statements
-      def insert_clause_methods
-        INSERT_CLAUSE_METHODS
-      end
-      alias replace_clause_methods insert_clause_methods
 
       # MySQL doesn't use the SQL standard DEFAULT VALUES.
       def insert_columns_sql(sql)
@@ -905,11 +963,17 @@ module Sequel
         BOOL_TRUE
       end
       
-      # MySQL does not support the SQL WITH clause for SELECT statements
-      def select_clause_methods
-        SELECT_CLAUSE_METHODS
+      # MySQL supports multiple rows in INSERT.
+      def multi_insert_sql_strategy
+        :values
       end
-      
+
+      def select_only_offset_sql(sql)
+        sql << LIMIT
+        literal_append(sql, @opts[:offset])
+        sql << ONLY_OFFSET
+      end
+  
       # Support FOR SHARE locking when using the :share lock style.
       def select_lock_sql(sql)
         @opts[:lock] == :share ? (sql << FOR_SHARE) : super
@@ -918,11 +982,6 @@ module Sequel
       # MySQL specific SQL_CALC_FOUND_ROWS option
       def select_calc_found_rows_sql(sql)
         sql << SQL_CALC_FOUND_ROWS if opts[:calc_found_rows]
-      end
-
-      # MySQL supports the ORDER BY and LIMIT clauses for UPDATE statements
-      def update_clause_methods
-        UPDATE_CLAUSE_METHODS
       end
 
       # MySQL uses WITH ROLLUP syntax.

@@ -26,7 +26,7 @@ you generally need to run Sequel's migrator with <tt>bin/sequel -m</tt>:
 Migrations in Sequel use a very simple DSL via the <tt>Sequel.migration</tt>
 method, and inside the DSL, use the <tt>Sequel::Database</tt> schema
 modification methods such as +create_table+ and +alter_table+.
-See the {schema modification guide}[link:files/doc/schema_modification_rdoc.html]
+See the {schema modification guide}[rdoc-ref:doc/schema_modification.rdoc]
 for details on the schema modification methods you can use.
 
 == A Basic Migration
@@ -72,6 +72,8 @@ reverse the given migration.  The +change+ block can usually correctly reverse
 the following methods:
 
 * +create_table+
+* +create_join_table+
+* +create_view+
 * +add_column+
 * +add_index+
 * +rename_column+
@@ -144,7 +146,7 @@ Migrations themselves do not contain any schema modification methods, but they m
 any of the <tt>Sequel::Database</tt> modification methods, of which there are many.  The main
 ones are +create_table+ and +alter_table+, but Sequel also comes with numerous other schema
 modification methods, most of which are shortcuts for +alter_table+ (all of these methods are
-described in more detail in the {schema modification guide}[link:files/doc/schema_modification_rdoc.html]):
+described in more detail in the {schema modification guide}[rdoc-ref:doc/schema_modification.rdoc]):
 
 * add_column
 * add_index
@@ -358,7 +360,7 @@ you should give it some thought before using it.
 
 == Ignoring missing migrations
 
-In some cases, you may want to allow a migration in the database that does not exist in the filesystem (deploying to an older version of code without running a down migration when deploy auto-migrates, for example). If required, you can pass <tt>:allow_missing_migration_files => true<tt> as an option. This will stop errors from being raised if there are migrations in the database that do not exist in the filesystem.
+In some cases, you may want to allow a migration in the database that does not exist in the filesystem (deploying to an older version of code without running a down migration when deploy auto-migrates, for example). If required, you can pass <tt>:allow_missing_migration_files => true</tt> as an option. This will stop errors from being raised if there are migrations in the database that do not exist in the filesystem.
 
 == Modifying existing migrations
 
@@ -385,14 +387,14 @@ However, the migrations you write should contain an +up+ block that does somethi
 reverses the changes made by the +up+ block:
 
   Sequel.migration do
-    up{...}
-    down{...}
+    up{}
+    down{}
   end
 
 or they should use the reversible migrations feature with a +change+ block:
 
   Sequel.migration do
-    change{...}
+    change{}
   end
 
 == What to put in your migration's +down+ block
@@ -481,6 +483,36 @@ unapplied migrations will be migrated up.  If you provide a <tt>-M</tt>, it will
 depend on which migrations that have been applied.  Applied migrations greater
 than that version will be migrated down, while unapplied migrations less than
 or equal to that version will be migrated up.
+
+== Running migrations from a Rake task
+
+You can also incorporate migrations into a Rakefile. Here's an example
+using integer migration versions.
+
+  namespace :db do
+    desc "Run migrations"
+    task :migrate, [:version] do |t, args|
+      require "sequel"
+      Sequel.extension :migration
+      db = Sequel.connect(ENV.fetch("DATABASE_URL"))
+      if args[:version]
+        puts "Migrating to version #{args[:version]}"
+        Sequel::Migrator.run(db, "db/migrations", target: args[:version].to_i)
+      else
+        puts "Migrating to latest"
+        Sequel::Migrator.run(db, "db/migrations")
+      end
+    end
+  end
+
+To migrate to the latest version, run:
+
+  rake db:migrate
+
+This Rake task takes an optional argument specifying the target
+version. To migrate to version 42, run:
+
+  rake db:migrate[42]
 
 == Verbose migrations
 

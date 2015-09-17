@@ -16,6 +16,7 @@ rescue LoadError
 end
 
 Sequel::Database.extension :columns_introspection if ENV['SEQUEL_COLUMNS_INTROSPECTION']
+Sequel::Model.cache_associations = false if ENV['SEQUEL_NO_CACHE_ASSOCIATIONS']
 Sequel.cache_anonymous_models = false
 
 class Sequel::Database
@@ -24,36 +25,9 @@ class Sequel::Database
   end
 end
 
-(defined?(RSpec) ? RSpec::Core::ExampleGroup : Spec::Example::ExampleGroup).class_eval do
-  def log 
-    begin
-      DB.loggers << Logger.new(STDOUT)
-      yield
-    ensure
-     DB.loggers.pop
-    end 
-  end 
+require './spec/guards_helper'
 
-  def self.cspecify(message, *checked, &block)
-    return specify(message, &block) if ENV['SEQUEL_NO_PENDING']
-    pending = false
-    checked.each do |c|
-      case c
-      when DB.adapter_scheme
-        pending = c
-      when Proc
-        pending = c if c.first.call(DB)
-      when Array
-        pending = c if c.first == DB.adapter_scheme && c.last == DB.call(DB)
-      end
-    end
-    if pending
-      specify(message){pending("Not yet working on #{Array(pending).join(', ')}", &block)}
-    else
-      specify(message, &block)
-    end
-  end
-
+class Minitest::HooksSpec
   def check_sqls
     yield unless ENV['SEQUEL_NO_CHECK_SQLS']
   end

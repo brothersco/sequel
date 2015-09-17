@@ -36,6 +36,12 @@ module Sequel
       o.is_a?(self.class) && db == o.db && opts == o.opts && sql == o.sql
     end
 
+    # An object representing the current date or time, should be an instance
+    # of Sequel.datetime_class.
+    def current_datetime
+      Sequel.datetime_class.now
+    end
+
     # Alias for ==
     def eql?(o)
       self == o
@@ -44,7 +50,7 @@ module Sequel
     # Similar to #clone, but returns an unfrozen clone if the receiver is frozen.
     def dup
       o = clone
-      o.opts.delete(:frozen)
+      o.instance_variable_set(:@frozen, false) if frozen?
       o
     end
     
@@ -68,13 +74,13 @@ module Sequel
 
     # Sets the frozen flag on the dataset, so you can't modify it. Returns the receiver.
     def freeze
-      @opts[:frozen] = true
+      @frozen = true
       self
     end
 
     # Whether the object is frozen.
     def frozen?
-      @opts[:frozen]
+      @frozen == true
     end
    
     # Alias of +first_source_alias+
@@ -97,7 +103,7 @@ module Sequel
       end
       case s = source.first
       when SQL::AliasedExpression
-        s.aliaz
+        s.alias
       when Symbol
         _, _, aliaz = split_symbol(s)
         aliaz ? aliaz.to_sym : s
@@ -163,6 +169,11 @@ module Sequel
       "#<#{visible_class_name}: #{sql.inspect}>"
     end
     
+    # Whether this dataset is a joined dataset (multiple FROM tables or any JOINs).
+    def joined_dataset?
+     !!((opts[:from].is_a?(Array) && opts[:from].size > 1) || opts[:join])
+    end
+
     # The alias to use for the row_number column, used when emulating OFFSET
     # support and for eager limit strategies
     def row_number_column
@@ -178,11 +189,22 @@ module Sequel
         c_table, column, aliaz = split_symbol(c)
         [c_table ? SQL::QualifiedIdentifier.new(c_table, column.to_sym) : column.to_sym, aliaz]
       when SQL::AliasedExpression
-        [c.expression, c.aliaz]
+        [c.expression, c.alias]
       when SQL::JoinClause
         [c.table, c.table_alias]
       else
         [c, nil]
+      end
+    end
+
+    # This returns an SQL::Identifier or SQL::AliasedExpression containing an
+    # SQL identifier that represents the unqualified column for the given value.
+    # The given value should be a Symbol, SQL::Identifier, SQL::QualifiedIdentifier,
+    # or SQL::AliasedExpression containing one of those.  In other cases, this
+    # returns nil
+    def unqualified_column_for(v)
+      unless v.is_a?(String)
+        _unqualified_column_for(v)
       end
     end
 
@@ -225,6 +247,27 @@ module Sequel
     end
 
     private
+
+    # Internal recursive version of unqualified_column_for, handling Strings inside
+    # of other objects.
+    def _unqualified_column_for(v)
+      case v
+      when Symbol
+        _, c, a = Sequel.split_symbol(v)
+        c = Sequel.identifier(c)
+        a ? c.as(a) : c
+      when String
+        Sequel.identifier(v)
+      when SQL::Identifier
+        v
+      when SQL::QualifiedIdentifier
+        _unqualified_column_for(v.column)
+      when SQL::AliasedExpression
+        if expr = unqualified_column_for(v.expression)
+          SQL::AliasedExpression.new(expr, v.alias)
+        end
+      end
+    end
 
     # Return the class name for this dataset, but skip anonymous classes
     def visible_class_name

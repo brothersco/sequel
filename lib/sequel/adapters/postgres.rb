@@ -108,7 +108,25 @@ module Sequel
     # PGconn subclass for connection specific methods used with the
     # pg, postgres, or postgres-pr driver.
     class Adapter < ::PGconn
-      DISCONNECT_ERROR_RE = /\Acould not receive data from server/
+      # The underlying exception classes to reraise as disconnect errors
+      # instead of regular database errors.
+      DISCONNECT_ERROR_CLASSES = [IOError, Errno::EPIPE, Errno::ECONNRESET]
+      if defined?(::PG::ConnectionBad)
+        DISCONNECT_ERROR_CLASSES << ::PG::ConnectionBad
+      end
+      
+      disconnect_errors = [
+        'could not receive data from server',
+        'no connection to the server',
+        'connection not open',
+        'terminating connection due to administrator command',
+        'PQconsumeInput() '
+       ]
+
+      # Since exception class based disconnect checking may not work,
+      # also trying parsing the exception message to look for disconnect
+      # errors.
+      DISCONNECT_ERROR_RE = /\A#{Regexp.union(disconnect_errors)}/
       
       self.translate_results = false if respond_to?(:translate_results=)
       
@@ -117,11 +135,15 @@ module Sequel
       # are SQL strings.
       attr_reader(:prepared_statements) if SEQUEL_POSTGRES_USES_PG
       
-      # Raise a Sequel::DatabaseDisconnectError if a PGError is raised and
-      # the connection status cannot be determined or it is not OK.
+      # Raise a Sequel::DatabaseDisconnectError if a one of the disconnect
+      # error classes is raised, or a PGError is raised and the connection
+      # status cannot be determined or it is not OK.
       def check_disconnect_errors
         begin
           yield
+        rescue *DISCONNECT_ERROR_CLASSES => e
+          disconnect = true
+          raise(Sequel.convert_exception_class(e, Sequel::DatabaseDisconnectError))
         rescue PGError => e
           disconnect = false
           begin
@@ -133,9 +155,6 @@ module Sequel
           disconnect ||= !status_ok
           disconnect ||= e.message =~ DISCONNECT_ERROR_RE
           disconnect ? raise(Sequel.convert_exception_class(e, Sequel::DatabaseDisconnectError)) : raise
-        rescue IOError, Errno::EPIPE, Errno::ECONNRESET => e
-          disconnect = true
-          raise(Sequel.convert_exception_class(e, Sequel::DatabaseDisconnectError))
         ensure
           block if status_ok && !disconnect
         end
@@ -170,6 +189,7 @@ module Sequel
       INFINITE_TIMESTAMP_STRINGS = ['infinity'.freeze, '-infinity'.freeze].freeze
       INFINITE_DATETIME_VALUES = ([PLUS_INFINITY, MINUS_INFINITY] + INFINITE_TIMESTAMP_STRINGS).freeze
       
+      set_adapter_scheme :postgresql
       set_adapter_scheme :postgres
 
       # Whether infinite timestamps/dates should be converted on retrieval.  By default, no
@@ -185,7 +205,7 @@ module Sequel
       def bound_variable_arg(arg, conn)
         case arg
         when Sequel::SQL::Blob
-          conn.escape_bytea(arg)
+          {:value=>arg, :type=>17, :format=>1}
         when Sequel::SQLTime
           literal(arg)
         when DateTime, Time
@@ -198,12 +218,13 @@ module Sequel
       # Connects to the database.  In addition to the standard database
       # options, using the :encoding or :charset option changes the
       # client encoding for the connection, :connect_timeout is a
-      # connection timeout in seconds, and :sslmode sets whether postgres's
-      # sslmode.  :connect_timeout and :ssl_mode are only supported if the pg
-      # driver is used.
+      # connection timeout in seconds, :sslmode sets whether postgres's
+      # sslmode, and :notice_receiver handles server notices in a proc.
+      # :connect_timeout, :ssl_mode, and :notice_receiver are only supported
+      # if the pg driver is used.
       def connect(server)
         opts = server_opts(server)
-        conn = if SEQUEL_POSTGRES_USES_PG
+        if SEQUEL_POSTGRES_USES_PG
           connection_params = {
             :host => opts[:host],
             :port => opts[:port] || 5432,
@@ -213,9 +234,15 @@ module Sequel
             :connect_timeout => opts[:connect_timeout] || 20,
             :sslmode => opts[:sslmode]
           }.delete_if { |key, value| blank_object?(value) }
-          Adapter.connect(connection_params)
+          conn = Adapter.connect(connection_params)
+
+          conn.instance_variable_set(:@prepared_statements, {})
+
+          if receiver = opts[:notice_receiver]
+            conn.set_notice_receiver(&receiver)
+          end
         else
-          Adapter.connect(
+          conn = Adapter.connect(
             (opts[:host] unless blank_object?(opts[:host])),
             opts[:port] || 5432,
             nil, '',
@@ -224,6 +251,9 @@ module Sequel
             opts[:password]
           )
         end
+
+        conn.instance_variable_set(:@db, self)
+
         if encoding = opts[:encoding] || opts[:charset]
           if conn.respond_to?(:set_client_encoding)
             conn.set_client_encoding(encoding)
@@ -231,8 +261,7 @@ module Sequel
             conn.async_exec("set client_encoding to '#{encoding}'")
           end
         end
-        conn.instance_variable_set(:@db, self)
-        conn.instance_variable_set(:@prepared_statements, {}) if SEQUEL_POSTGRES_USES_PG
+
         connection_configuration_sqls.each{|sql| conn.execute(sql)}
         conn
       end
@@ -410,14 +439,16 @@ module Sequel
         # :after_listen :: An object that responds to +call+ that is called with the underlying connection after the LISTEN
         #                  statement is sent, but before the connection starts waiting for notifications.
         # :loop :: Whether to continually wait for notifications, instead of just waiting for a single
-        #          notification. If this option is given, a block must be provided.  If this object responds to call, it is
+        #          notification. If this option is given, a block must be provided.  If this object responds to +call+, it is
         #          called with the underlying connection after each notification is received (after the block is called).
         #          If a :timeout option is used, and a callable object is given, the object will also be called if the
         #          timeout expires.  If :loop is used and you want to stop listening, you can either break from inside the
         #          block given to #listen, or you can throw :stop from inside the :loop object's call method or the block.
         # :server :: The server on which to listen, if the sharding support is being used.
-        # :timeout :: How long to wait for a notification, in seconds (can provide a float value for
-        #             fractional seconds).  If not given or nil, waits indefinitely.
+        # :timeout :: How long to wait for a notification, in seconds (can provide a float value for fractional seconds).
+        #             If this object responds to +call+, it will be called and should return the number of seconds to wait.
+        #             If the loop option is also specified, the object will be called on each iteration to obtain a new
+        #             timeout value.  If not given or nil, waits indefinitely.
         #
         # This method is only supported if pg is used as the underlying ruby driver.  It returns the
         # channel the notification was sent to (as a string), unless :loop was used, in which case it returns nil.
@@ -436,19 +467,25 @@ module Sequel
                   conn.execute(sql)
                 end
                 opts[:after_listen].call(conn) if opts[:after_listen]
-                timeout = opts[:timeout] ? [opts[:timeout]] : []
+                timeout = opts[:timeout]
+                if timeout
+                  timeout_block = timeout.respond_to?(:call) ? timeout : proc{timeout}
+                end
+
                 if l = opts[:loop]
                   raise Error, 'calling #listen with :loop requires a block' unless block
                   loop_call = l.respond_to?(:call)
                   catch(:stop) do
                     loop do
-                      conn.wait_for_notify(*timeout, &block)
+                      t = timeout_block ? [timeout_block.call] : []
+                      conn.wait_for_notify(*t, &block)
                       l.call(conn) if loop_call
                     end
                   end
                   nil
                 else
-                  conn.wait_for_notify(*timeout, &block)
+                  t = timeout_block ? [timeout_block.call] : []
+                  conn.wait_for_notify(*t, &block)
                 end
               ensure
                 conn.execute("UNLISTEN *")
@@ -618,6 +655,7 @@ module Sequel
 
       Database::DatasetClass = self
       APOS = Sequel::Dataset::APOS
+      DEFAULT_CURSOR_NAME = 'sequel_cursor'.freeze
       
       # Yield all rows returned by executing the given SQL and converting
       # the types.
@@ -626,15 +664,22 @@ module Sequel
         execute(sql){|res| yield_hash_rows(res, fetch_rows_set_cols(res)){|h| yield h}}
       end
       
+      # Use a cursor for paging.
+      def paged_each(opts=OPTS, &block)
+        use_cursor(opts).each(&block)
+      end
+
       # Uses a cursor for fetching records, instead of fetching the entire result
       # set at once.  Can be used to process large datasets without holding
-      # all rows in memory (which is what the underlying drivers do
+      # all rows in memory (which is what the underlying drivers may do
       # by default). Options:
       #
-      # * :rows_per_fetch - the number of rows per fetch (default 1000).  Higher
-      #   numbers result in fewer queries but greater memory use.
-      # * :cursor_name - the name assigned to the cursor (default 'sequel_cursor').
-      #   Nested cursors require different names.
+      # :cursor_name :: The name assigned to the cursor (default 'sequel_cursor').
+      #                 Nested cursors require different names.
+      # :hold :: Declare the cursor WITH HOLD and don't use transaction around the
+      #          cursor usage.
+      # :rows_per_fetch :: The number of rows per fetch (default 1000).  Higher
+      #                    numbers result in fewer queries but greater memory use.
       #
       # Usage:
       #
@@ -645,7 +690,19 @@ module Sequel
       # This is untested with the prepared statement/bound variable support,
       # and unlikely to work with either.
       def use_cursor(opts=OPTS)
-        clone(:cursor=>{:rows_per_fetch=>1000, :cursor_name => 'sequel_cursor'}.merge(opts))
+        clone(:cursor=>{:rows_per_fetch=>1000}.merge!(opts))
+      end
+
+      # Replace the WHERE clause with one that uses CURRENT OF with the given
+      # cursor name (or the default cursor name).  This allows you to update a
+      # large dataset by updating individual rows while processing the dataset
+      # via a cursor:
+      #
+      #   DB[:huge_table].use_cursor(:rows_per_fetch=>1).each do |row|
+      #     DB[:huge_table].where_current_of.update(:column=>ruby_method(row))
+      #   end
+      def where_current_of(cursor_name=DEFAULT_CURSOR_NAME)
+        clone(:where=>Sequel.lit(['CURRENT OF '], Sequel.identifier(cursor_name)))
       end
 
       if SEQUEL_POSTGRES_USES_PG
@@ -684,46 +741,13 @@ module Sequel
           end
         end
 
-        # Allow use of bind arguments for PostgreSQL using the pg driver.
-        module BindArgumentMethods
-          include ArgumentMapper
-          include ::Sequel::Postgres::DatasetMethods::PreparedStatementMethods
-          
-          private
-          
-          # Execute the given SQL with the stored bind arguments.
-          def execute(sql, opts=OPTS, &block)
-            super(sql, {:arguments=>bind_arguments}.merge(opts), &block)
-          end
-          
-          # Same as execute, explicit due to intricacies of alias and super.
-          def execute_dui(sql, opts=OPTS, &block)
-            super(sql, {:arguments=>bind_arguments}.merge(opts), &block)
-          end
-        end
-        
-        # Allow use of server side prepared statements for PostgreSQL using the
-        # pg driver.
-        module PreparedStatementMethods
-          include BindArgumentMethods
+        BindArgumentMethods = prepared_statements_module(:bind, [ArgumentMapper, ::Sequel::Postgres::DatasetMethods::PreparedStatementMethods], %w'execute execute_dui')
 
+        PreparedStatementMethods = prepared_statements_module(:prepare, BindArgumentMethods, %w'execute execute_dui') do
           # Raise a more obvious error if you attempt to call a unnamed prepared statement.
           def call(*)
             raise Error, "Cannot call prepared statement without a name" if prepared_statement_name.nil?
             super
-          end
-          
-          private
-          
-          # Execute the stored prepared statement name and the stored bind
-          # arguments instead of the SQL given.
-          def execute(sql, opts=OPTS, &block)
-            super(prepared_statement_name, opts, &block)
-          end
-          
-          # Same as execute, explicit due to intricacies of alias and super.
-          def execute_dui(sql, opts=OPTS, &block)
-            super(prepared_statement_name, opts, &block)
           end
         end
         
@@ -760,11 +784,14 @@ module Sequel
       # Use a cursor to fetch groups of records at a time, yielding them to the block.
       def cursor_fetch_rows(sql)
         server_opts = {:server=>@opts[:server] || :read_only}
-        cursor_name = quote_identifier(@opts[:cursor][:cursor_name])
-        db.transaction(server_opts) do 
+        cursor = @opts[:cursor]
+        hold = cursor[:hold]
+        cursor_name = quote_identifier(cursor[:cursor_name] || DEFAULT_CURSOR_NAME)
+        rows_per_fetch = cursor[:rows_per_fetch].to_i
+
+        db.send(*(hold ? [:synchronize, server_opts[:server]] : [:transaction, server_opts])) do 
           begin
-            execute_ddl("DECLARE #{cursor_name} NO SCROLL CURSOR WITHOUT HOLD FOR #{sql}", server_opts)
-            rows_per_fetch = @opts[:cursor][:rows_per_fetch].to_i
+            execute_ddl("DECLARE #{cursor_name} NO SCROLL CURSOR WITH#{'OUT' unless hold} HOLD FOR #{sql}", server_opts)
             rows_per_fetch = 1000 if rows_per_fetch <= 0
             fetch_sql = "FETCH FORWARD #{rows_per_fetch} FROM #{cursor_name}"
             cols = nil
@@ -780,8 +807,15 @@ module Sequel
                 return if res.ntuples < rows_per_fetch
               end
             end
+          rescue Exception => e
+            raise
           ensure
-            execute_ddl("CLOSE #{cursor_name}", server_opts)
+            begin
+              execute_ddl("CLOSE #{cursor_name}", server_opts)
+            rescue
+              raise e if e
+              raise
+            end
           end
         end
       end

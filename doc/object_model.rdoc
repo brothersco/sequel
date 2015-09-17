@@ -204,7 +204,7 @@ If Sequel needs to represent an SQL concept that does not map directly to an exi
 ruby class, it will generally use a Sequel::SQL::Expression subclass to represent that
 concept.
 
-Some of the examples below show examples that require the {core_extensions extension}[link:files/doc/core_extensions_rdoc.html].
+Some of the examples below show examples that require the {core_extensions extension}[rdoc-ref:doc/core_extensions.rdoc].
 
 === Sequel::LiteralString
 
@@ -291,12 +291,17 @@ The following shortcuts exist for creating Sequel::SQL::QualifiedIdentifier obje
 Sequel::SQL::AliasedExpression objects represent aliased expressions in SQL.  The alias
 is treated as an identifier, but the expression can be an arbitrary Sequel expression:
 
-  Sequel::SQL::AliasedExpression.new(:column, :alias) # "column" AS "alias"
+  Sequel::SQL::AliasedExpression.new(:column, :alias)
+  # "column" AS "alias"
+
+  Sequel::SQL::AliasedExpression.new(:table, :alias, [:column_alias1, :column_alias2])
+  # "table" AS "alias"("column_alias1", "column_alias2")
 
 The following shortcuts exist for creating Sequel::SQL::AliasedExpression objects:
 
   Sequel.expr(:column___alias)
   Sequel.as(:column, :alias)
+  Sequel.as(:column, :alias, [:column_alias1, :column_alias2])
   :column.as(:alias) # core_extensions extension
   
 === Sequel::SQL::ComplexExpression
@@ -530,11 +535,11 @@ block expression support:
 In the above code, the block is instance-evaled inside a VirtualRow instance.
 
 These objects are usually not instantiated manually.  See the
-{Virtual Row Guide}[link:files/doc/virtual_rows_rdoc.html] for details.
+{Virtual Row Guide}[rdoc-ref:doc/virtual_rows.rdoc] for details.
 
 === Sequel::SQL::Window
 
-Sequel::SQL::Window objects represent the windows used by Sequel::SQL::WindowFunction.
+Sequel::SQL::Window objects represent the windows used by Sequel::SQL::Function.
 They use a hash-based API, supporting the :frame, :order, :partition, and :window
 options:
 
@@ -543,17 +548,6 @@ options:
 
   Sequel::SQL::Window.new(:parition=>:a, :frame=>:all)
   # (PARTITION BY "a" ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
-
-=== Sequel::SQL::WindowFunction
-
-Sequel::SQL::WindowFunction objects represent SQL window function calls.  These
-just combine a Sequel::SQL::Function with a Sequel::SQL::Window:
-
-  function = Sequel::SQL::Function.new(:f, 1)
-  window = Sequel::SQL::Window.new(:order=>:a)
-  Sequel::SQL::WindowFunction.new(function, window) # f(1) OVER (ORDER BY "a")
-
-Virtual rows offer a shortcut for creating Sequel::SQL::Window objects.
 
 === Sequel::SQL::Wrapper
 

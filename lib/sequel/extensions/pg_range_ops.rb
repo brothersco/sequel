@@ -19,8 +19,8 @@
 #
 #   r = Sequel.expr(:range).pg_range
 #
-# If you have loaded the {core_extensions extension}[link:files/doc/core_extensions_rdoc.html]),
-# or you have loaded the {core_refinements extension}[link:files/doc/core_refinements_rdoc.html])
+# If you have loaded the {core_extensions extension}[rdoc-ref:doc/core_extensions.rdoc],
+# or you have loaded the core_refinements extension
 # and have activated refinements for the file, you can also use Symbol#pg_range:
 #
 #   r = :range.pg_range
@@ -52,6 +52,7 @@
 # loading this extension.  Doing so will allow you to use PGArray#op to get
 # an RangeOp, allowing you to perform range operations on range literals.
 
+#
 module Sequel
   module Postgres
     # The RangeOp class is a simple container for a single object that

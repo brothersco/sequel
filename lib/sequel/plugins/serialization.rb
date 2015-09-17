@@ -36,8 +36,8 @@ module Sequel
     #   # Register custom serializer/deserializer pair, if desired
     #   require 'sequel/plugins/serialization'
     #   Sequel::Plugins::Serialization.register_format(:reverse,
-    #     lambda{|v| v.reverse},
-    #     lambda{|v| v.reverse})
+    #     lambda(&:reverse),
+    #     lambda(&:reverse))
     #
     #   class User < Sequel::Model
     #     # Built-in format support when loading the plugin
@@ -51,11 +51,22 @@ module Sequel
     #     serialize_attributes :reverse, :password
     #
     #     # Use a custom serializer/deserializer pair without registering
-    #     serialize_attributes [lambda{|v| v.reverse}, lambda{|v| v.reverse}], :password
+    #     serialize_attributes [lambda(&:reverse), lambda(&:reverse)], :password
     #   end
     #   user = User.create
     #   user.permissions = { :global => 'read-only' }
     #   user.save
+    #
+    # Note that if you mutate serialized column values without reassigning them,
+    # those changes won't be picked up by <tt>Model#save_changes</tt> or
+    # <tt>Model#update</tt>.  Example:
+    #
+    #   user = User[1]
+    #   user.permissions[:global] = 'foo'
+    #   user.save_changes # Will not pick up changes to permissions
+    #
+    # You can use the +serialization_modification_detection+ plugin to pick
+    # up such changes.
     module Serialization
       # The default serializers supported by the serialization module.
       # Use register_format to add serializers to this hash.
@@ -95,7 +106,7 @@ module Sequel
             end
           end
         end)
-      register_format(:yaml, lambda{|v| v.to_yaml}, lambda{|v| YAML.load(v)})
+      register_format(:yaml, lambda(&:to_yaml), lambda{|v| YAML.load(v)})
       register_format(:json, lambda{|v| Sequel.object_to_json(v)}, lambda{|v| Sequel.parse_json(v)})
 
       module ClassMethods
@@ -118,7 +129,7 @@ module Sequel
         def serialize_attributes(format, *columns)
           if format.is_a?(Symbol)
             unless format = REGISTERED_FORMATS[format]
-              raise(Error, "Unsupported serialization format: #{format} (valid formats: #{REGISTERED_FORMATS.keys.map{|k| k.inspect}.join})")
+              raise(Error, "Unsupported serialization format: #{format} (valid formats: #{REGISTERED_FORMATS.keys.map(&:inspect).join})")
             end
           end
           serializer, deserializer = format
@@ -152,7 +163,12 @@ module Sequel
                 end
               end
               define_method("#{column}=") do |v| 
-                changed_columns << column unless changed_columns.include?(column)
+                if !changed_columns.include?(column) && (new? || get_column_value(column) != v)
+                  changed_columns << column
+
+                  will_change_column(column) if respond_to?(:will_change_column)
+                end
+
                 deserialized_values[column] = v
               end
             end
@@ -161,24 +177,9 @@ module Sequel
       end
 
       module InstanceMethods
-        # Serialize deserialized values before saving
-        def before_save
-          serialize_deserialized_values
-          super
-        end
-        
         # Hash of deserialized values, used as a cache.
         def deserialized_values
           @deserialized_values ||= {}
-        end
-
-        # Freeze the deserialized values
-        def dup
-          dv = deserialized_values.dup
-          super.instance_eval do
-            @deserialized_values = dv
-            self
-          end
         end
 
         # Freeze the deserialized values
@@ -189,6 +190,12 @@ module Sequel
 
         private
 
+        # Serialize deserialized values before saving
+        def _before_validation
+          serialize_deserialized_values
+          super
+        end
+        
         # Clear any cached deserialized values when doing a manual refresh.
         def _refresh_set_values(hash)
           @deserialized_values.clear if @deserialized_values
@@ -202,6 +209,13 @@ module Sequel
             raise Sequel::Error, "no entry in deserialization_map for #{column.inspect}" unless callable = model.deserialization_map[column]
             callable.call(v)
           end
+        end
+
+        # Dup the deserialized values when duping model instance.
+        def initialize_copy(other)
+          super
+          @deserialized_values = Hash[other.deserialized_values]
+          self
         end
 
         # Serialize all deserialized values

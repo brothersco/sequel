@@ -2,11 +2,6 @@ Sequel.require 'adapters/shared/mssql'
 
 module Sequel
   module JDBC
-    class Database
-      # Alias the generic JDBC version so it can be called directly later
-      alias jdbc_schema_parse_table schema_parse_table
-    end
-    
     # Database and Dataset instance methods for MSSQL specific
     # support via JDBC.
     module MSSQL
@@ -27,14 +22,8 @@ module Sequel
             sql = opts[:prepared] ? ATAT_IDENTITY : SCOPE_IDENTITY
             rs = log_yield(sql){stmt.executeQuery(sql)}
             rs.next
-            rs.getInt(1)
+            rs.getLong(1)
           end
-        end
-        
-        # Call the generic JDBC version instead of MSSQL version,
-        # since the JDBC version handles primary keys.
-        def schema_parse_table(table, opts=OPTS)
-          jdbc_schema_parse_table(table, opts)
         end
         
         # Primary key indexes appear to start with pk__ on MSSQL

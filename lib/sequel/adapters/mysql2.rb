@@ -17,12 +17,12 @@ module Sequel
       # Connect to the database.  In addition to the usual database options,
       # the following options have effect:
       #
-      # * :auto_is_null - Set to true to use MySQL default behavior of having
-      #   a filter for an autoincrement column equals NULL to return the last
-      #   inserted row.
-      # * :charset - Same as :encoding (:encoding takes precendence)
-      # * :encoding - Set all the related character sets for this
-      #   connection (connection, client, database, server, and results).
+      # :auto_is_null :: Set to true to use MySQL default behavior of having
+      #                  a filter for an autoincrement column equals NULL to return the last
+      #                  inserted row.
+      # :charset :: Same as :encoding (:encoding takes precendence)
+      # :encoding :: Set all the related character sets for this
+      #              connection (connection, client, database, server, and results).
       #
       # The options hash is also passed to mysql2, and can include mysql2
       # options such as :local_infile.
@@ -32,6 +32,7 @@ module Sequel
         opts[:username] ||= opts.delete(:user)
         opts[:flags] ||= 0
         opts[:flags] |= ::Mysql2::Client::FOUND_ROWS if ::Mysql2::Client.const_defined?(:FOUND_ROWS)
+        opts[:encoding] ||= opts[:charset]
         conn = ::Mysql2::Client.new(opts)
         conn.query_options.merge!(:symbolize_keys=>true, :cache_rows=>false)
 
@@ -41,7 +42,7 @@ module Sequel
         # in case the READ_DEFAULT_GROUP overrode the provided encoding.
         # Doesn't work across implicit reconnects, but Sequel doesn't turn on
         # that feature.
-        if encoding = opts[:encoding] || opts[:charset]
+        if encoding = opts[:encoding]
           sqls.unshift("SET NAMES #{conn.escape(encoding.to_s)}")
         end
 
@@ -61,7 +62,7 @@ module Sequel
         execute(sql, opts){|c| return c.last_id}
       end
 
-      # Return the version of the MySQL server two which we are connecting.
+      # Return the version of the MySQL server to which we are connecting.
       def server_version(server=nil)
         @server_version ||= (synchronize(server){|conn| conn.server_info[:id]} || super)
       end
@@ -144,6 +145,7 @@ module Sequel
     class Dataset < Sequel::Dataset
       include Sequel::MySQL::DatasetMethods
       include Sequel::MySQL::PreparedStatements::DatasetMethods
+      STREAMING_SUPPORTED = ::Mysql2::VERSION >= '0.3.12'
 
       Database::DatasetClass = self
 
@@ -160,9 +162,18 @@ module Sequel
         self
       end
 
+      # Use streaming to implement paging if Mysql2 supports it.
+      def paged_each(opts=OPTS, &block)
+        if STREAMING_SUPPORTED
+          stream.each(&block)
+        else
+          super
+        end
+      end
+
       # Return a clone of the dataset that will stream rows when iterating
       # over the result set, so it can handle large datasets that
-      # won't fit in memory (Requires mysql 0.3.12 to have an effect).
+      # won't fit in memory (Requires mysql 0.3.12+ to have an effect).
       def stream
         clone(:stream=>true)
       end
@@ -177,8 +188,11 @@ module Sequel
       end
 
       # Set the :type option to :select if it hasn't been set.
-      def execute(sql, opts=OPTS, &block)
-        super(sql, {:type=>:select, :stream=>@opts[:stream]}.merge(opts), &block)
+      def execute(sql, opts=OPTS)
+        opts = Hash[opts]
+        opts[:type] = :select
+        opts[:stream] = @opts[:stream]
+        super
       end
 
       # Handle correct quoting of strings using ::Mysql2::Client#escape.

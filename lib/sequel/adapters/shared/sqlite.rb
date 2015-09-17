@@ -97,7 +97,8 @@ module Sequel
         im = input_identifier_meth
         indexes = {}
         metadata_dataset.with_sql("PRAGMA index_list(?)", im.call(table)).each do |r|
-          next if r[:name] =~ PRIMARY_KEY_INDEX_RE
+          # :only_autocreated internal option can be used to get only autocreated indexes
+          next if (!!(r[:name] =~ PRIMARY_KEY_INDEX_RE) ^ !!opts[:only_autocreated])
           indexes[m.call(r[:name])] = {:unique=>r[:unique].to_i==1}
         end
         indexes.each do |k, v|
@@ -131,7 +132,7 @@ module Sequel
       def sqlite_version
         return @sqlite_version if defined?(@sqlite_version)
         @sqlite_version = begin
-          v = get{sqlite_version{}}
+          v = fetch('SELECT sqlite_version()').single_value
           [10000, 100, 1].zip(v.split('.')).inject(0){|a, m| a + m[0] * Integer(m[1])}
         rescue
           0
@@ -159,10 +160,8 @@ module Sequel
       end
 
       # Override the default setting for whether to use timezones in timestamps.
-      # For backwards compatibility, it is set to +true+ by default.
-      # Anyone wanting to use SQLite's datetime functions should set it to +false+
-      # using this method.  It's possible that the default will change in a future version,
-      # so anyone relying on timezones in timestamps should set this to +true+.
+      # It is set to +false+ by default, as SQLite's date/time methods do not
+      # support timezones in timestamps.
       attr_writer :use_timestamp_timezones
 
       # SQLite supports timezones in timestamps, since it just stores them as strings,
@@ -186,7 +185,7 @@ module Sequel
       # Array of symbols specifying the table names in the current database.
       #
       # Options:
-      # * :server - Set the server to use.
+      # :server :: Set the server to use.
       def tables(opts=OPTS)
         tables_and_views(TABLES_FILTER, opts)
       end
@@ -206,7 +205,7 @@ module Sequel
       # Array of symbols specifying the view names in the current database.
       #
       # Options:
-      # * :server - Set the server to use.
+      # :server :: Set the server to use.
       def views(opts=OPTS)
         tables_and_views(VIEWS_FILTER, opts)
       end
@@ -331,10 +330,12 @@ module Sequel
       end
 
       DATABASE_ERROR_REGEXPS = {
-        /is not unique\z/ => UniqueConstraintViolation,
-        /foreign key constraint failed\z/ => ForeignKeyConstraintViolation,
+        /(is|are) not unique\z|PRIMARY KEY must be unique\z|UNIQUE constraint failed: .+\z/ => UniqueConstraintViolation,
+        /foreign key constraint failed\z/i => ForeignKeyConstraintViolation,
+        /\ACHECK constraint failed/ => CheckConstraintViolation,
         /\A(SQLITE ERROR 19 \(CONSTRAINT\) : )?constraint failed\z/ => ConstraintViolation,
-        /may not be NULL\z/ => NotNullConstraintViolation,
+        /may not be NULL\z|NOT NULL constraint failed: .+\z/ => NotNullConstraintViolation,
+        /\ASQLITE ERROR \d+ \(\) : CHECK constraint failed: / => CheckConstraintViolation
       }.freeze
       def database_error_regexps
         DATABASE_ERROR_REGEXPS
@@ -346,6 +347,7 @@ module Sequel
         cols.each do |c|
           c[:default] = LiteralString.new(c[:default]) if c[:default]
           c[:type] = c[:db_type]
+          c.delete(:auto_increment)
         end
         cols
       end
@@ -389,6 +391,19 @@ module Sequel
           constraints.concat(fks.each{|h| h[:type] = :foreign_key})
         end
 
+        # Determine unique constraints and make sure the new columns have them
+        unique_columns = []
+        indexes(table, :only_autocreated=>true).each_value do |h|
+          unique_columns.concat(h[:columns]) if h[:columns].length == 1 && h[:unique]
+        end
+        unique_columns -= pks
+        unless unique_columns.empty?
+          unique_columns.map!{|c| quote_identifier(c)}
+          def_columns.each do |c|
+            c[:unique] = true if unique_columns.include?(quote_identifier(c[:name]))
+          end
+        end
+        
         def_columns_str = (def_columns.map{|c| column_definition_sql(c)} + constraints.map{|c| constraint_definition_sql(c)}).join(', ')
         new_columns = old_columns.dup
         opts[:new_columns_proc].call(new_columns) if opts[:new_columns_proc]
@@ -402,7 +417,7 @@ module Sequel
            "DROP TABLE #{bt}"
         ]
         indexes(table).each do |name, h|
-          if (h[:columns].map{|x| x.to_s} - new_columns).empty?
+          if (h[:columns].map(&:to_s) - new_columns).empty?
             a << alter_table_sql(table, h.merge(:op=>:add_index, :name=>name))
           end
         end
@@ -442,19 +457,16 @@ module Sequel
           row.delete(:cid)
           row[:allow_null] = row.delete(:notnull).to_i == 0
           row[:default] = row.delete(:dflt_value)
-          row[:primary_key] = row.delete(:pk).to_i > 0
           row[:default] = nil if blank_object?(row[:default]) || row[:default] == 'NULL'
           row[:db_type] = row.delete(:type)
+          if row[:primary_key] = row.delete(:pk).to_i > 0
+            row[:auto_increment] = row[:db_type].downcase == 'integer'
+          end
           row[:type] = schema_column_type(row[:db_type])
           row
         end
       end
       
-      # SQLite treats integer primary keys as autoincrementing (alias of rowid).
-      def schema_autoincrementing_primary_key?(schema)
-        super && schema[:db_type].downcase == 'integer'
-      end
-
       # SQLite supports schema parsing using the table_info PRAGMA, so
       # parse the output of that into the format Sequel expects.
       def schema_parse_table(table_name, opts)
@@ -482,7 +494,6 @@ module Sequel
     module DatasetMethods
       include Dataset::Replace
 
-      SELECT_CLAUSE_METHODS = Dataset.clause_methods(:select, %w'select distinct columns from join where group having compounds order limit')
       CONSTANT_MAP = {:CURRENT_DATE=>"date(CURRENT_TIMESTAMP, 'localtime')".freeze, :CURRENT_TIMESTAMP=>"datetime(CURRENT_TIMESTAMP, 'localtime')".freeze, :CURRENT_TIME=>"time(CURRENT_TIMESTAMP, 'localtime')".freeze}
       EMULATED_FUNCTION_MAP = {:char_length=>'length'.freeze}
       EXTRACT_MAP = {:year=>"'%Y'", :month=>"'%m'", :day=>"'%d'", :hour=>"'%H'", :minute=>"'%M'", :second=>"'%f'"}
@@ -502,6 +513,11 @@ module Sequel
       HSTAR = "H*".freeze
       DATE_OPEN = "date(".freeze
       DATETIME_OPEN = "datetime(".freeze
+      ONLY_OFFSET = " LIMIT -1 OFFSET ".freeze
+
+      Dataset.def_sql_method(self, :delete, [['if db.sqlite_version >= 30803', %w'with delete from where'], ["else", %w'delete from where']])
+      Dataset.def_sql_method(self, :insert, [['if db.sqlite_version >= 30803', %w'with insert into columns values'], ["else", %w'insert into columns values']])
+      Dataset.def_sql_method(self, :update, [['if db.sqlite_version >= 30803', %w'with update table set where'], ["else", %w'update table set where']])
 
       def cast_sql_append(sql, expr, type)
         if type == Time or type == DateTime
@@ -525,11 +541,7 @@ module Sequel
           sql << NOT_SPACE
           complex_expression_sql_append(sql, (op == :"NOT ILIKE" ? :ILIKE : :LIKE), args)
         when :^
-          sql << complex_expression_arg_pairs(args) do |a, b|
-            a = literal(a)
-            b = literal(b)
-            "((~(#{a} & #{b})) & (#{a} | #{b}))"
-          end
+          complex_expression_arg_pairs_append(sql, args){|a, b| Sequel.lit(["((~(", " & ", ")) & (", " | ", "))"], a, b, a, b)}
         when :extract
           part = args.at(0)
           raise(Sequel::Error, "unsupported extract argument: #{part.inspect}") unless format = EXTRACT_MAP[part]
@@ -593,6 +605,16 @@ module Sequel
         end
       end
       
+      # SQLite 3.8.3+ supports common table expressions.
+      def supports_cte?(type=:select)
+        db.sqlite_version >= 30803
+      end
+
+      # SQLite does not support table aliases with column aliases
+      def supports_derived_column_lists?
+        false
+      end
+
       # SQLite does not support INTERSECT ALL or EXCEPT ALL
       def supports_intersect_except_all?
         false
@@ -623,7 +645,8 @@ module Sequel
       private
       
       # SQLite uses string literals instead of identifiers in AS clauses.
-      def as_sql_append(sql, aliaz)
+      def as_sql_append(sql, aliaz, column_aliases=nil)
+        raise Error, "sqlite does not support derived column lists" if column_aliases
         aliaz = aliaz.value if aliaz.is_a?(SQL::Identifier)
         sql << AS
         literal_append(sql, aliaz.to_s)
@@ -646,6 +669,11 @@ module Sequel
         end
       end
 
+      # SQLite supports a maximum of 500 rows in a VALUES clause.
+      def default_import_slice
+        500
+      end
+
       # SQL fragment specifying a list of identifiers
       def identifier_list(columns)
         columns.map{|i| quote_identifier(i)}.join(COMMA)
@@ -666,16 +694,27 @@ module Sequel
         @db.integer_booleans ? '1' : "'t'"
       end
 
-      # SQLite does not support the SQL WITH clause
-      def select_clause_methods
-        SELECT_CLAUSE_METHODS
+      # SQLite only supporting multiple rows in the VALUES clause
+      # starting in 3.7.11.  On older versions, fallback to using a UNION.
+      def multi_insert_sql_strategy
+        db.sqlite_version >= 30711 ? :values : :union
       end
-      
+
       # SQLite does not support FOR UPDATE, but silently ignore it
       # instead of raising an error for compatibility with other
       # databases.
       def select_lock_sql(sql)
         super unless @opts[:lock] == :update
+      end
+
+      def select_only_offset_sql(sql)
+        sql << ONLY_OFFSET
+        literal_append(sql, @opts[:offset])
+      end
+  
+      # SQLite supports quoted function names.
+      def supports_quoted_function_names?
+        true
       end
 
       # SQLite treats a DELETE with no WHERE clause as a TRUNCATE

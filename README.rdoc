@@ -12,18 +12,21 @@ toolkit for Ruby.
   two-phase commit, transaction isolation, master/slave
   configurations, and database sharding.
 * Sequel currently has adapters for ADO, Amalgalite, CUBRID,
-  DataObjects, DB2, DBI, Firebird, IBM_DB, Informix, JDBC, MySQL,
-  Mysql2, ODBC, OpenBase, Oracle, PostgreSQL, SQLite3, Swift, and
-  TinyTDS.
+  DataObjects, IBM_DB, JDBC, MySQL, Mysql2, ODBC, Oracle,
+  PostgreSQL, SQLAnywhere, SQLite3, Swift, and TinyTDS.
 
 == Resources
 
-* {Website}[http://sequel.rubyforge.org]
-* {Blog}[http://sequel.heroku.com]
-* {Source code}[http://github.com/jeremyevans/sequel]
-* {Bug tracking}[http://github.com/jeremyevans/sequel/issues]
-* {Google group}[http://groups.google.com/group/sequel-talk]
-* {RDoc}[http://sequel.rubyforge.org/rdoc]
+Website :: http://sequel.jeremyevans.net
+RDoc Documentation :: http://sequel.jeremyevans.net/rdoc
+Source Code :: https://github.com/jeremyevans/sequel
+Bug tracking (GitHub Issues) :: http://github.com/jeremyevans/sequel/issues
+Discussion Forum (sequel-talk Google Group) :: http://groups.google.com/group/sequel-talk
+IRC Channel (#sequel) :: irc://irc.freenode.net/sequel
+
+If you have questions about how to use Sequel, please ask on the
+sequel-talk Google Group or IRC.  Only use the the bug tracker to report
+bugs in Sequel, not to ask for help on using Sequel.
 
 To check out the source code:
   
@@ -35,7 +38,7 @@ If you have any comments or suggestions please post to the Google group.
 
 == Installation
 
-  sudo gem install sequel
+  gem install sequel
   
 == A Short Example
 
@@ -70,7 +73,7 @@ Sequel includes an IRB console for quick access to databases (usually referred t
 
 You get an IRB session with the database object stored in DB.
 
-In addition to providing an IRB shell (the default behavior), bin/sequel also has support for migrating databases, dumping schema migrations, and copying databases.  See the {bin/sequel guide}[link:files/doc/bin_sequel_rdoc.html] for more details.
+In addition to providing an IRB shell (the default behavior), bin/sequel also has support for migrating databases, dumping schema migrations, and copying databases.  See the {bin/sequel guide}[rdoc-ref:doc/bin_sequel.rdoc] for more details.
 
 == An Introduction
 
@@ -219,6 +222,8 @@ Sequel also accepts expressions:
   
   my_posts = posts.where{stamp > Date.today << 1}
   # WHERE stamp > '2010-06-14'
+  my_posts = posts.where{stamp =~ Date.today}
+  # WHERE stamp = '2010-07-14'
   
 Some adapters will also let you specify Regexps:
 
@@ -250,12 +255,12 @@ After filtering, you can retrieve the matching records by using any of the retri
 
   my_posts.each{|row| p row}
   
-See the {Dataset Filtering}[link:files/doc/dataset_filtering_rdoc.html] file for more details.
+See the {Dataset Filtering}[rdoc-ref:doc/dataset_filtering.rdoc] file for more details.
 
 === Security
 
 Designing apps with security in mind is a best practice.
-Please read the {Security Guide}[link:files/doc/security_rdoc.html] for details on security
+Please read the {Security Guide}[rdoc-ref:doc/security.rdoc] for details on security
 issues that you should be aware of when using Sequel.
 
 === Summarizing Records
@@ -313,7 +318,7 @@ You can also specify descending order:
 
 === Core Extensions
 
-Note the use of <tt>Sequel.desc(:stamp)</tt> in the above example.  Much of Sequel's DSL uses this style, calling methods on the Sequel module that return SQL expression objects.  Sequel also ships with a {core_extensions extension}[link:files/doc/core_extensions_rdoc.html]) that integrates Sequel's DSL better into the ruby language, allowing you to write:
+Note the use of <tt>Sequel.desc(:stamp)</tt> in the above example.  Much of Sequel's DSL uses this style, calling methods on the Sequel module that return SQL expression objects.  Sequel also ships with a {core_extensions extension}[rdoc-ref:doc/core_extensions.rdoc]) that integrates Sequel's DSL better into the ruby language, allowing you to write:
 
   :stamp.desc
 
@@ -425,6 +430,12 @@ You can then do anything you like with the dataset:
   # ON order_items.item_id = items.id
   # WHERE order_items.order_id = 1234
   
+Note that the default selection in Sequel is <tt>*</tt>, which includes all columns
+in all joined tables.  Because Sequel returns results as a hash keyed by column name
+symbols, if any tables have columns with the same name, this will clobber the columns
+in the returned hash.  So when joining you are usually going to want to change the
+selection using +select+, +select_all+, and/or +select_append+.
+
 == Column references in Sequel
 
 Sequel expects column names to be specified using symbols. In addition, returned hashes always use symbols as their keys. This allows you to freely mix literal values and column references in many cases. For example, the two following lines produce equivalent SQL:
@@ -460,7 +471,7 @@ to select from a qualified table:
 
 === Identifier aliases
 
-You can also alias identifiers by using the triple undersecore special notation <tt>:column___alias</tt> or <tt>:table__column___alias</tt>:
+You can also alias identifiers by using the triple underscore special notation <tt>:column___alias</tt> or <tt>:table__column___alias</tt>:
 
   items.literal(:price___p)
   # price AS p
@@ -574,7 +585,7 @@ That will just change the value for the object, it will not update the row in th
 
 === Mass assignment
 
-You can also set the values for multiple columns in a single method call, using one of the mass-assignment methods.  See the {mass assignment guide}[link:files/doc/mass_assignment_rdoc.html] for details.  For example +set+ updates the model's column values without saving:
+You can also set the values for multiple columns in a single method call, using one of the mass-assignment methods.  See the {mass assignment guide}[rdoc-ref:doc/mass_assignment.rdoc] for details.  For example +set+ updates the model's column values without saving:
 
   post.set(:title=>'hey there', :updated_by=>'foo')
 
@@ -640,12 +651,14 @@ SQL query.
 
 === Associations
 
-Associations are used in order to specify relationships between model classes that reflect relationships between tables in the database, which are usually specified using foreign keys.  You specify model associations via the +many_to_one+, +one_to_one+, +one_to_many+, and +many_to_many+ class methods:
+Associations are used in order to specify relationships between model classes that reflect relationships between tables in the database, which are usually specified using foreign keys.  You specify model associations via class methods:
 
   class Post < Sequel::Model
     many_to_one :author
     one_to_many :comments
+    one_to_one :first_comment, :class=>:Comment, :order=>:id
     many_to_many :tags
+    one_through_one :first_tag, :class=>:Tag, :order=>:name, :right_key=>:tag_id
   end
 
 +many_to_one+ and +one_to_one+ create a getter and setter for each model object:
@@ -746,6 +759,28 @@ You can dynamically customize eager loads for both +eager+ and +eager_graph+ whi
   # Eagerly load only replies containing 'foo', and the person and tags for those replies
   Post.eager(:replies=>{proc{|ds| ds.where(Sequel.like(text, '%foo%'))}=>[:person, :tags]}).all
 
+=== Joining with Associations
+
+You can use the association_join method to add a join to the model's dataset based on the assocation:
+
+  Post.association_join(:author)
+  # SELECT * FROM posts
+  # INNER JOIN authors AS author ON (author.id = posts.author_id)
+
+This comes with variants for different join types:
+
+  Post.association_left_join(:replies)
+  # SELECT * FROM posts
+  # LEFT JOIN replies ON (replies.post_id = posts.id)
+
+Similar to the eager loading methods, you can use multiple associations and nested associations:
+
+  Post.association_join(:author, :replies=>:person).all
+  # SELECT * FROM posts
+  # INNER JOIN authors AS author ON (author.id = posts.author_id)
+  # INNER JOIN replies ON (replies.post_id = posts.id)
+  # INNER JOIN people AS person ON (person.id = replies.person_id)
+
 === Extending the underlying dataset
 
 The recommended way to implement table-wide logic by defining methods on the dataset using +dataset_module+:
@@ -777,7 +812,7 @@ Sequel models also provide a +subset+ class method that creates a dataset method
 
 You can define a +validate+ method for your model, which +save+
 will check before attempting to save the model in the database.
-If an attribute of the model isn't valid, you should add a error
+If an attribute of the model isn't valid, you should add an error
 message for that attribute to the model object's +errors+. If an
 object has any errors added by the validate method, +save+ will
 raise an error or return false depending on how it is configured

@@ -66,10 +66,10 @@ module Sequel
     # You can override the options for any specific association by making
     # sure the plugin options contain one of the following keys:
     #
-    # * :parent - hash of options for the parent association
-    # * :children - hash of options for the children association
-    # * :ancestors - hash of options for the ancestors association
-    # * :descendants - hash of options for the descendants association
+    # :parent :: hash of options for the parent association
+    # :children :: hash of options for the children association
+    # :ancestors :: hash of options for the ancestors association
+    # :descendants :: hash of options for the descendants association
     #
     # Note that you can change the name of the above associations by specifying
     # a :name key in the appropriate hash of options above.  For example:
@@ -80,15 +80,15 @@ module Sequel
     # Any other keys in the main options hash are treated as options shared by
     # all of the associations.  Here's a few options that affect the plugin:
     #
-    # * :key - The foreign key in the table that points to the primary key
-    #   of the parent (default: :parent_id)
-    # * :primary_key - The primary key to use (default: the model's primary key)
-    # * :key_alias - The symbol identifier to use for aliasing when eager
-    #   loading (default: :x_root_x)
-    # * :cte_name - The symbol identifier to use for the common table expression
-    #   (default: :t)
-    # * :level_alias - The symbol identifier to use when eagerly loading descendants
-    #   up to a given level (default: :x_level_x)
+    # :key :: The foreign key in the table that points to the primary key
+    #         of the parent (default: :parent_id)
+    # :primary_key :: The primary key to use (default: the model's primary key)
+    # :key_alias :: The symbol identifier to use for aliasing when eager
+    #               loading (default: :x_root_x)
+    # :cte_name :: The symbol identifier to use for the common table expression
+    #              (default: :t)
+    # :level_alias :: The symbol identifier to use when eagerly loading descendants
+    #                 up to a given level (default: :x_level_x)
     module RcteTree
       # Create the appropriate parent, children, ancestors, and descendants
       # associations for the model.
@@ -148,7 +148,7 @@ module Sequel
         a[:read_only] = true unless a.has_key?(:read_only)
         a[:eager_loader_key] = key
         a[:dataset] ||= proc do
-          base_ds = model.filter(prkey_array.zip(key_array.map{|k| send(k)}))
+          base_ds = model.filter(prkey_array.zip(key_array.map{|k| get_column_value(k)}))
           recursive_ds = model.join(t, key_array.zip(prkey_array))
           if c = a[:conditions]
             (base_ds, recursive_ds) = [base_ds, recursive_ds].collect do |ds|
@@ -204,15 +204,12 @@ module Sequel
             end
           end
           table_alias = model.dataset.schema_and_table(model.table_name)[1].to_sym
-          elds = model.eager_loading_dataset(r,
-           model.from(SQL::AliasedExpression.new(t, table_alias)).
-            with_recursive(t, base_case,
-             recursive_case,
-             :args=>((key_aliases + col_aliases) if col_aliases)),
-           r.select,
-           eo[:associations], eo)
-          elds = elds.select_append(ka) unless elds.opts[:select] == nil
-          elds.all do |obj|
+          ds = model.from(SQL::AliasedExpression.new(t, table_alias)).
+            with_recursive(t, base_case, recursive_case,
+             :args=>((key_aliases + col_aliases) if col_aliases))
+          ds = r.apply_eager_dataset_changes(ds)
+          ds = ds.select_append(ka) unless ds.opts[:select] == nil
+          model.eager_load_results(r, eo.merge(:loader=>false, :initalize_rows=>false, :dataset=>ds, :id_map=>nil)) do |obj|
             opk = prkey_conv[obj]
             if parent_map.has_key?(opk)
               if idm_obj = parent_map[opk]
@@ -246,7 +243,7 @@ module Sequel
         d[:read_only] = true unless d.has_key?(:read_only)
         la = d[:level_alias] ||= :x_level_x
         d[:dataset] ||= proc do
-          base_ds = model.filter(key_array.zip(prkey_array.map{|k| send(k)}))
+          base_ds = model.filter(key_array.zip(prkey_array.map{|k| get_column_value(k)}))
           recursive_ds = model.join(t, prkey_array.zip(key_array))
           if c = d[:conditions]
             (base_ds, recursive_ds) = [base_ds, recursive_ds].collect do |ds|
@@ -275,7 +272,11 @@ module Sequel
               end
             end
             children_map.each do |parent_id, objs|
-              parent_map[parent_id].associations[childrena] = objs
+              parent_obj = parent_map[parent_id]
+              parent_obj.associations[childrena] = objs
+              objs.each do |obj|
+                obj.associations[parent] = parent_obj
+              end
             end
           end
         end
@@ -304,17 +305,16 @@ module Sequel
             level = associations
             no_cache_level = level - 1
             associations = {}
-            base_case = base_case.select_more(SQL::AliasedExpression.new(0, la))
+            base_case = base_case.select_more(SQL::AliasedExpression.new(Sequel.cast(0, Integer), la))
             recursive_case = recursive_case.select_more(SQL::AliasedExpression.new(SQL::QualifiedIdentifier.new(t, la) + 1, la)).filter(SQL::QualifiedIdentifier.new(t, la) < level - 1)
           end
           table_alias = model.dataset.schema_and_table(model.table_name)[1].to_sym
-          elds = model.eager_loading_dataset(r,
-           model.from(SQL::AliasedExpression.new(t, table_alias)).with_recursive(t, base_case, recursive_case,
-            :args=>((key_aliases + col_aliases + (level ? [la] : [])) if col_aliases)),
-           r.select,
-           associations, eo)
-          elds = elds.select_append(ka) unless elds.opts[:select] == nil
-          elds.all do |obj|
+          ds = model.from(SQL::AliasedExpression.new(t, table_alias)).
+            with_recursive(t, base_case, recursive_case,
+              :args=>((key_aliases + col_aliases + (level ? [la] : [])) if col_aliases))
+          ds = r.apply_eager_dataset_changes(ds)
+          ds = ds.select_append(ka) unless ds.opts[:select] == nil
+          model.eager_load_results(r, eo.merge(:loader=>false, :initalize_rows=>false, :dataset=>ds, :id_map=>nil, :associations=>{})) do |obj|
             if level
               no_cache = no_cache_level == obj.values.delete(la)
             end
@@ -337,7 +337,12 @@ module Sequel
             (children_map[key_conv[obj]] ||= []) << obj
           end
           children_map.each do |parent_id, objs|
-            parent_map[parent_id].associations[childrena] = objs.uniq
+            objs = objs.uniq
+            parent_obj = parent_map[parent_id]
+            parent_obj.associations[childrena] = objs
+            objs.each do |obj|
+              obj.associations[parent] = parent_obj
+            end
           end
         end
         model.one_to_many descendants, d

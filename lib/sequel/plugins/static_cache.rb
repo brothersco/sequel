@@ -12,7 +12,10 @@ module Sequel
     # instances.  This is slower as it requires creating new objects, but it allows
     # you to make changes to the object and save them.  If you set the option to false,
     # you are responsible for updating the cache manually (the pg_static_cache_updater
-    # extension can handle this automatically).
+    # extension can handle this automatically).  Note that it is not safe to use the
+    # :frozen=>false option if you are mutating column values directly.  If you are
+    # mutating column values, you should also override Model.call to dup each mutable
+    # column value to ensure it is not shared by other instances.
     #
     # The caches this plugin creates are used for the following things:
     #
@@ -32,6 +35,23 @@ module Sequel
     #   # Cache the AlbumType class statically, but return unfrozen instances
     #   # that can be modified.
     #   AlbumType.plugin :static_cache, :frozen=>false
+    #
+    # If you would like the speed benefits of keeping :frozen=>true but still need
+    # to occasionally update objects, you can side-step the before_ hooks by
+    # overriding the class method +static_cache_allow_modifications?+ to return true:
+    #
+    #   class Model
+    #     plugin :static_cache
+    #
+    #     def self.static_cache_allow_modifications?
+    #       true
+    #     end
+    #   end
+    #
+    # Now if you +#dup+ a Model object (the resulting object is not frozen), you
+    # will be able to update and save the duplicate.
+    # Note the caveats around your responsibility to update the cache still applies.
+    #
     module StaticCache
       # Populate the static caches when loading the plugin. Options:
       # :frozen :: Whether retrieved model objects are frozen.  The default is true,
@@ -108,7 +128,7 @@ module Sequel
         def to_hash(key_column = nil, value_column = nil)
         if key_column.nil? && value_column.nil?
           if @static_cache_frozen
-            return cache.dup
+            return Hash[cache]
           else
             key_column = primary_key
           end
@@ -180,7 +200,10 @@ module Sequel
         def load_cache
           a = dataset.all
           h = {}
-          a.each{|o| h[o.pk.freeze] = o.freeze}
+          a.each do |o|
+            o.errors.freeze
+            h[o.pk.freeze] = o.freeze
+          end
           @all = a.freeze
           @cache = h.freeze
         end
@@ -192,7 +215,7 @@ module Sequel
           if @static_cache_frozen
             o
           elsif o
-            call(o.values.dup)
+            call(Hash[o.values])
           end
         end
       end

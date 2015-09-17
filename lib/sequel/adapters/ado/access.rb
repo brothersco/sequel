@@ -109,7 +109,7 @@ module Sequel
         def execute_insert(sql, opts=OPTS)
           synchronize(opts[:server]) do |conn|
             begin
-              r = log_yield(sql){conn.Execute(sql)}
+              log_yield(sql){conn.Execute(sql)}
               res = log_yield(LAST_INSERT_ID){conn.Execute(LAST_INSERT_ID)}
               res.getRows.transpose.each{|r| return r.shift}
             rescue ::WIN32OLERuntimeError => e
@@ -294,7 +294,7 @@ module Sequel
         
         def fetch_ado_schema(type, criteria=[])
           execute_open_ado_schema(type, criteria) do |s|
-            cols = s.Fields.extend(Enumerable).map {|c| c.Name}
+            cols = s.Fields.extend(Enumerable).map(&:Name)
             s.getRows.transpose.each do |r|
               row = {}
               cols.each{|c| row[c] = r.shift}

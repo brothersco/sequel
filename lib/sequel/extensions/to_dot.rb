@@ -7,6 +7,7 @@
 #
 #   Sequel.extension :to_dot
 
+#
 module Sequel
   class ToDot
     module DatasetMethods
@@ -91,7 +92,8 @@ module Sequel
       when SQL::AliasedExpression
         dot "AliasedExpression"
         v(e.expression, :expression)
-        v(e.aliaz, :alias)
+        v(e.alias, :alias)
+        v(e.columns, :columns) if e.columns
       when SQL::CaseExpression
         dot "CaseExpression"
         v(e.expression, :expression) if e.expression
@@ -102,18 +104,16 @@ module Sequel
         v(e.expr, :expr)
         v(e.type, :type)
       when SQL::Function
-        dot "Function: #{e.f}"
+        dot "Function: #{e.name}"
         e.args.each_with_index do |val, j|
           v(val, j)
         end
+        v(e.args, :args)
+        v(e.opts, :opts)
       when SQL::Subscript 
         dot "Subscript"
         v(e.f, :f)
         v(e.sub, :sub)
-      when SQL::WindowFunction
-        dot "WindowFunction"
-        v(e.function, :function)
-        v(e.window, :window)
       when SQL::Window
         dot "Window"
         v(e.opts, :opts)
@@ -130,8 +130,7 @@ module Sequel
           str << " USING"
         end
         dot str
-        v(e.table, :table)
-        v(e.table_alias, :alias) if e.table_alias
+        v(e.table_expr, :table)
         if e.is_a?(SQL::JoinOnClause)
           v(e.on, :on) 
         elsif e.is_a?(SQL::JoinUsingClause)

@@ -2,6 +2,14 @@ Sequel.require 'adapters/shared/mssql'
 
 module Sequel
   module ODBC
+    Sequel.synchronize do
+      DATABASE_SETUP[:mssql] = proc do |db|
+        db.extend Sequel::ODBC::MSSQL::DatabaseMethods
+        db.dataset_class = Sequel::ODBC::MSSQL::Dataset
+        db.send(:set_mssql_unicode_strings)
+      end
+    end
+
     # Database and Dataset instance methods for MSSQL specific
     # support via ODBC.
     module MSSQL
@@ -32,10 +40,12 @@ module Sequel
       class Dataset < ODBC::Dataset
         include Sequel::MSSQL::DatasetMethods
 
+        # Use ODBC format, not Microsoft format, as the ODBC layer does
+        # some translation.  MSSQL version is over-ridden to allow 3 millisecond decimal places        
+        TIMESTAMP_FORMAT="{ts '%Y-%m-%d %H:%M:%S%N'}".freeze
+
         private
 
-        # Use ODBC format, not Microsoft format, as the ODBC layer does
-        # some translation.
         def default_timestamp_format
           TIMESTAMP_FORMAT
         end

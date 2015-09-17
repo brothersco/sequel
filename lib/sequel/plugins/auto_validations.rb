@@ -1,13 +1,14 @@
 module Sequel
   module Plugins
-    # The auto_validations plugin automatically sets up three types of validations
+    # The auto_validations plugin automatically sets up the following types of validations
     # for your model columns:
     #
     # 1. type validations for all columns
     # 2. not_null validations on NOT NULL columns (optionally, presence validations)
     # 3. unique validations on columns or sets of columns with unique indexes
+    # 4. max length validations on string columns
     #
-    # To determine the columns to use for the not_null validations and the types for the type validations,
+    # To determine the columns to use for the type/not_null/max_length validations,
     # the plugin looks at the database schema for the model's table.  To determine
     # the unique validations, Sequel looks at the indexes on the table.  In order
     # for this plugin to be fully functional, the underlying database adapter needs
@@ -35,6 +36,13 @@ module Sequel
     # This is useful if you want to enforce that NOT NULL string columns do not
     # allow empty values.
     #
+    # You can also supply hashes to pass options through to the underlying validators:
+    #
+    #   Model.plugin :auto_validations, unique_opts: {only_if_modified: true}
+    #
+    # This works for unique_opts, max_length_opts, schema_types_opts,
+    # explicit_not_null_opts, and not_null_opts.
+    #
     # Usage:
     #
     #   # Make all model subclass use auto validations (called before loading subclasses)
@@ -43,14 +51,29 @@ module Sequel
     #   # Make the Album class use auto validations
     #   Album.plugin :auto_validations
     module AutoValidations
+      NOT_NULL_OPTIONS = {:from=>:values}.freeze
+      EXPLICIT_NOT_NULL_OPTIONS = {:from=>:values, :allow_missing=>true}.freeze
+      MAX_LENGTH_OPTIONS = {:from=>:values, :allow_nil=>true}.freeze
+      SCHEMA_TYPES_OPTIONS = NOT_NULL_OPTIONS
+      UNIQUE_OPTIONS = NOT_NULL_OPTIONS
+
       def self.apply(model, opts=OPTS)
         model.instance_eval do
           plugin :validation_helpers
           @auto_validate_presence = false
           @auto_validate_not_null_columns = []
           @auto_validate_explicit_not_null_columns = []
+          @auto_validate_max_length_columns = []
           @auto_validate_unique_columns = []
           @auto_validate_types = true
+
+          @auto_validate_options = {
+              :not_null=>NOT_NULL_OPTIONS,
+              :explicit_not_null=>EXPLICIT_NOT_NULL_OPTIONS,
+              :max_length=>MAX_LENGTH_OPTIONS,
+              :schema_types=>SCHEMA_TYPES_OPTIONS,
+              :unique=>UNIQUE_OPTIONS
+          }.freeze
         end
       end
 
@@ -61,6 +84,14 @@ module Sequel
           if opts[:not_null] == :presence
             @auto_validate_presence = true
           end
+
+          h = @auto_validate_options.dup
+          [:not_null, :explicit_not_null, :max_length, :schema_types, :unique].each do |type|
+            if type_opts = opts[:"#{type}_opts"]
+              h[type] = h[type].merge(type_opts).freeze
+            end
+          end
+          @auto_validate_options = h.freeze
         end
       end
 
@@ -71,10 +102,17 @@ module Sequel
         # The columns with automatic not_null validations for columns present in the values.
         attr_reader :auto_validate_explicit_not_null_columns
 
+        # The columns or sets of columns with automatic max_length validations, as an array of
+        # pairs, with the first entry being the column name and second entry being the maximum length.
+        attr_reader :auto_validate_max_length_columns
+
         # The columns or sets of columns with automatic unique validations
         attr_reader :auto_validate_unique_columns
 
-        Plugins.inherited_instance_variables(self, :@auto_validate_presence=>nil, :@auto_validate_types=>nil, :@auto_validate_not_null_columns=>:dup, :@auto_validate_explicit_not_null_columns=>:dup, :@auto_validate_unique_columns=>:dup)
+        # Inherited options
+        attr_reader :auto_validate_options
+
+        Plugins.inherited_instance_variables(self, :@auto_validate_presence=>nil, :@auto_validate_types=>nil, :@auto_validate_not_null_columns=>:dup, :@auto_validate_explicit_not_null_columns=>:dup, :@auto_validate_max_length_columns=>:dup, :@auto_validate_unique_columns=>:dup, :@auto_validate_options => :dup)
         Plugins.after_set_dataset(self, :setup_auto_validations)
 
         # Whether to use a presence validation for not null columns
@@ -91,7 +129,7 @@ module Sequel
         # If :all is given as the type, skip all auto validations.
         def skip_auto_validations(type)
           if type == :all
-            [:not_null, :types, :unique].each{|v| skip_auto_validations(v)}
+            [:not_null, :types, :unique, :max_length].each{|v| skip_auto_validations(v)}
           elsif type == :types
             @auto_validate_types = false
           else
@@ -103,12 +141,14 @@ module Sequel
 
         # Parse the database schema and indexes and record the columns to automatically validate.
         def setup_auto_validations
-          not_null_cols, explicit_not_null_cols = db_schema.select{|col, sch| sch[:allow_null] == false}.partition{|col, sch| sch[:ruby_default].nil?}.map{|cs| cs.map{|col, sch| col}}
+          not_null_cols, explicit_not_null_cols = db_schema.select{|col, sch| sch[:allow_null] == false}.partition{|col, sch| sch[:default].nil?}.map{|cs| cs.map{|col, sch| col}}
           @auto_validate_not_null_columns = not_null_cols - Array(primary_key)
           explicit_not_null_cols += Array(primary_key)
           @auto_validate_explicit_not_null_columns = explicit_not_null_cols.uniq
-          @auto_validate_unique_columns = if db.supports_index_parsing?
-            db.indexes(dataset.first_source_table).select{|name, idx| idx[:unique] == true}.map{|name, idx| idx[:columns]}
+          @auto_validate_max_length_columns = db_schema.select{|col, sch| sch[:type] == :string && sch[:max_length].is_a?(Integer)}.map{|col, sch| [col, sch[:max_length]]}
+          table = dataset.first_source_table
+          @auto_validate_unique_columns = if db.supports_index_parsing? && [Symbol, SQL::QualifiedIdentifier, SQL::Identifier, String].any?{|c| table.is_a?(c)}
+            db.indexes(table).select{|name, idx| idx[:unique] == true}.map{|name, idx| idx[:columns].length == 1 ? idx[:columns].first : idx[:columns]}
           else
             []
           end
@@ -119,24 +159,35 @@ module Sequel
         # Validate the model's auto validations columns
         def validate
           super
+          opts = model.auto_validate_options
+
           unless (not_null_columns = model.auto_validate_not_null_columns).empty?
             if model.auto_validate_presence?
-              validates_presence(not_null_columns)
+              validates_presence(not_null_columns, opts[:not_null])
             else
-              validates_not_null(not_null_columns)
+              validates_not_null(not_null_columns, opts[:not_null])
             end
           end
           unless (not_null_columns = model.auto_validate_explicit_not_null_columns).empty?
             if model.auto_validate_presence?
-              validates_presence(not_null_columns, :allow_missing=>true)
+              validates_presence(not_null_columns, opts[:explicit_not_null])
             else
-              validates_not_null(not_null_columns, :allow_missing=>true)
+              validates_not_null(not_null_columns, opts[:explicit_not_null])
+            end
+          end
+          unless (max_length_columns = model.auto_validate_max_length_columns).empty?
+            max_length_columns.each do |col, len|
+              validates_max_length(len, col, opts[:max_length])
             end
           end
 
-          validates_schema_types if model.auto_validate_types?
+          validates_schema_types(keys, opts[:schema_types]) if model.auto_validate_types?
 
-          model.auto_validate_unique_columns.each{|cols| validates_unique(cols)}
+          unique_opts = Hash[opts[:unique]]
+          if model.respond_to?(:sti_dataset)
+            unique_opts[:dataset] = model.sti_dataset
+          end
+          model.auto_validate_unique_columns.each{|cols| validates_unique(cols, unique_opts)}
         end
       end
     end

@@ -100,13 +100,14 @@ module Sequel
     #
     # Accepts the following options:
     # :default_string_column_size :: The default size of string columns, 255 by default.
-    # :identifier_input_method :: A string method symbol to call on identifiers going into the database
-    # :identifier_output_method :: A string method symbol to call on identifiers coming from the database
-    # :logger :: A specific logger to use
-    # :loggers :: An array of loggers to use
-    # :quote_identifiers :: Whether to quote identifiers
-    # :servers :: A hash specifying a server/shard specific options, keyed by shard symbol 
-    # :single_threaded :: Whether to use a single-threaded connection pool
+    # :identifier_input_method :: A string method symbol to call on identifiers going into the database.
+    # :identifier_output_method :: A string method symbol to call on identifiers coming from the database.
+    # :logger :: A specific logger to use.
+    # :loggers :: An array of loggers to use.
+    # :preconnect :: Whether to automatically connect to the maximum number of servers.
+    # :quote_identifiers :: Whether to quote identifiers.
+    # :servers :: A hash specifying a server/shard specific options, keyed by shard symbol .
+    # :single_threaded :: Whether to use a single-threaded connection pool.
     # :sql_log_level :: Method to use to log SQL to a logger, :info by default.
     #
     # All options given are also passed to the connection pool.
@@ -117,6 +118,7 @@ module Sequel
       self.log_warn_duration = @opts[:log_warn_duration]
       block ||= proc{|server| connect(server)}
       @opts[:servers] = {} if @opts[:servers].is_a?(String)
+      @sharded = !!@opts[:servers]
       @opts[:adapter_class] = self.class
       
       @opts[:single_threaded] = @single_threaded = typecast_value_boolean(@opts.fetch(:single_threaded, Database.single_threaded))
@@ -131,6 +133,7 @@ module Sequel
       @dataset_class = dataset_class_default
       @cache_schema = typecast_value_boolean(@opts.fetch(:cache_schema, true))
       @dataset_modules = []
+      @symbol_literal_cache = {}
       @schema_type_classes = SCHEMA_TYPE_CLASSES.dup
       self.sql_log_level = @opts[:sql_log_level] ? @opts[:sql_log_level].to_sym : :info
       @pool = ConnectionPool.get_pool(self, @opts)
@@ -142,6 +145,7 @@ module Sequel
         Sequel.synchronize{::Sequel::DATABASES.push(self)}
       end
       Sequel::Database.run_after_initialize(self)
+      @pool.send(:preconnect) if typecast_value_boolean(@opts[:preconnect]) && @pool.respond_to?(:preconnect, true)
     end
 
     # If a transaction is not currently in process, yield to the block immediately.
@@ -195,7 +199,7 @@ module Sequel
         if pr = Sequel.synchronize{EXTENSIONS[ext]}
           pr.call(self)
         else
-          raise(Error, "Extension #{ext} does not have specific support handling individual databases")
+          raise(Error, "Extension #{ext} does not have specific support handling individual databases (try: Sequel.extension #{ext.inspect})")
         end
       end
       self
@@ -235,6 +239,17 @@ module Sequel
       schema_utility_dataset.literal(v)
     end
 
+    # Return the literalized version of the symbol if cached, or
+    # nil if it is not cached.
+    def literal_symbol(sym)
+      Sequel.synchronize{@symbol_literal_cache[sym]}
+    end
+
+    # Set the cached value of the literal symbol.
+    def literal_symbol_set(sym, lit)
+      Sequel.synchronize{@symbol_literal_cache[sym] = lit}
+    end
+
     # Synchronize access to the prepared statements cache.
     def prepared_statement(name)
       Sequel.synchronize{prepared_statements[name]}
@@ -262,6 +277,12 @@ module Sequel
     def set_prepared_statement(name, ps)
       ps.prepared_sql
       Sequel.synchronize{prepared_statements[name] = ps}
+    end
+
+    # Whether this database instance uses multiple servers, either for sharding
+    # or for master/slave.
+    def sharded?
+      @sharded
     end
 
     # The timezone to use for this database, defaulting to <tt>Sequel.database_timezone</tt>.
@@ -369,11 +390,11 @@ module Sequel
       nil
     end
     
-    NOT_NULL_CONSTRAINT_SQLSTATES = %w'23502'.freeze.each{|s| s.freeze}
-    FOREIGN_KEY_CONSTRAINT_SQLSTATES = %w'23503 23506 23504'.freeze.each{|s| s.freeze}
-    UNIQUE_CONSTRAINT_SQLSTATES = %w'23505'.freeze.each{|s| s.freeze}
-    CHECK_CONSTRAINT_SQLSTATES = %w'23513 23514'.freeze.each{|s| s.freeze}
-    SERIALIZATION_CONSTRAINT_SQLSTATES = %w'40001'.freeze.each{|s| s.freeze}
+    NOT_NULL_CONSTRAINT_SQLSTATES = %w'23502'.freeze.each(&:freeze)
+    FOREIGN_KEY_CONSTRAINT_SQLSTATES = %w'23503 23506 23504'.freeze.each(&:freeze)
+    UNIQUE_CONSTRAINT_SQLSTATES = %w'23505'.freeze.each(&:freeze)
+    CHECK_CONSTRAINT_SQLSTATES = %w'23513 23514'.freeze.each(&:freeze)
+    SERIALIZATION_CONSTRAINT_SQLSTATES = %w'40001'.freeze.each(&:freeze)
     # Given the SQLState, return the appropriate DatabaseError subclass.
     def database_specific_error_class_from_sqlstate(sqlstate)
       case sqlstate

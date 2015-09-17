@@ -1,6 +1,12 @@
-# The query extension adds Sequel::Dataset#query which allows
+# The query extension adds a query method which allows
 # a different way to construct queries instead of the usual
-# method chaining.  See Sequel::Dataset#query for details.
+# method chaining:
+#
+#   dataset = DB[:items].query do
+#     select :x, :y, :z
+#     filter{(x > 1) & (y > 2)}
+#     reverse :z
+#   end
 #
 # You can load this extension into specific datasets:
 #
@@ -12,6 +18,7 @@
 #
 #   DB.extension(:query)
 
+#
 module Sequel
   module DatabaseQuery
     def self.extended(db)

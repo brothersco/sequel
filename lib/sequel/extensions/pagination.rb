@@ -1,6 +1,18 @@
 # The pagination extension adds the Sequel::Dataset#paginate and #each_page methods,
-# which return paginated (limited and offset) datasets with some helpful methods
-# that make creating a paginated display easier.
+# which return paginated (limited and offset) datasets with the following methods
+# added that make creating a paginated display easier:
+#
+# * +page_size+
+# * +page_count+
+# * +page_range+
+# * +current_page+
+# * +next_page+
+# * +prev_page+
+# * +first_page?+
+# * +last_page?+
+# * +pagination_record_count+
+# * +current_page_record_count+
+# * +current_page_record_range+
 #
 # This extension uses Object#extend at runtime, which can hurt performance.
 #
@@ -14,6 +26,7 @@
 #
 #   DB.extension(:pagination)
 
+#
 module Sequel
   module DatasetPagination
     # Returns a paginated dataset. The returned dataset is limited to
