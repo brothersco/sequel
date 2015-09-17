@@ -189,9 +189,9 @@ END_MIG
         end
         col_opts.delete(:default) if col_opts[:default].nil?
         col_opts[:null] = false if schema[:allow_null] == false
-        col_opts[:text] = true if (schema[:db_type] == 'nvarchar') and (schema[:max_chars] == -1)
 
         if ['varchar','nvarchar'].include? schema[:db_type]
+          col_opts[:text] = true if schema[:max_chars] == -1
           if schema.has_key?(:max_chars) and schema[:max_chars]>0
             col_opts[:size] = schema[:max_chars]
           end
